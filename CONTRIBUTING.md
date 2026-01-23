@@ -1,0 +1,137 @@
+# Contributing to Jean
+
+## Prerequisites
+
+- **Node.js** LTS (v20+)
+- **npm** (comes with Node)
+- **Rust** stable toolchain ([rustup.rs](https://rustup.rs))
+
+### Platform-specific dependencies
+
+**macOS**: Xcode Command Line Tools
+```bash
+xcode-select --install
+```
+
+**Linux** (Debian/Ubuntu):
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+```
+
+**Windows**: No additional dependencies
+
+## Quick Start
+
+```bash
+# Clone the repository
+git clone https://github.com/coollabsio/jean.git
+cd jean
+
+# Install dependencies
+npm install
+
+# Start development
+npm run tauri:dev
+```
+
+## Project Structure
+
+```
+jean/
+├── src/                    # React frontend
+│   ├── components/         # UI components
+│   ├── hooks/              # Custom React hooks
+│   ├── services/           # TanStack Query hooks
+│   ├── store/              # Zustand stores
+│   └── types/              # TypeScript interfaces
+├── src-tauri/              # Rust backend
+│   └── src/
+│       ├── lib.rs          # Core logic
+│       ├── chat/           # Chat operations
+│       ├── projects/       # Worktree/git operations
+│       └── terminal/       # PTY management
+├── docs/developer/         # Architecture documentation
+└── package.json
+```
+
+## Development Commands
+
+| Command | Description |
+|---------|-------------|
+| `npm run tauri:dev` | Start app in development mode |
+| `npm run check:all` | **Run all quality checks (must pass before PR)** |
+| `npm run typecheck` | TypeScript type checking |
+| `npm run lint` | ESLint (zero warnings enforced) |
+| `npm run lint:fix` | Auto-fix lint issues |
+| `npm run format` | Format code with Prettier |
+| `npm run test` | Run Vitest in watch mode |
+| `npm run test:run` | Run tests once |
+| `npm run rust:clippy` | Rust linting (warnings = errors) |
+| `npm run rust:fmt` | Format Rust code |
+
+## Code Style
+
+### TypeScript/React
+- **Strict mode** enabled
+- **ESLint** with zero warnings tolerance
+- **Prettier** formatting:
+  - No semicolons
+  - Single quotes
+  - 2-space indentation
+  - Trailing commas (ES5)
+
+### Rust
+- **rustfmt** for formatting
+- **clippy** with warnings as errors
+
+## Key Patterns
+
+Before contributing, familiarize yourself with these patterns (see `docs/developer/` for details):
+
+### State Management
+```
+useState (component) → Zustand (global UI) → TanStack Query (persistent data)
+```
+
+### Callback Pattern (Important!)
+Use `getState()` in callbacks to avoid render cascades:
+```typescript
+// Good - stable callback
+const handleAction = useCallback(() => {
+  const { data, setData } = useStore.getState()
+  setData(newData)
+}, [])
+
+// Bad - re-creates on every state change
+const { data, setData } = useStore()
+const handleAction = useCallback(() => setData(newData), [data, setData])
+```
+
+### Backend Communication
+All Tauri commands are wrapped in TanStack Query hooks in `src/services/`.
+
+## Testing
+
+- **Frontend**: Vitest + React Testing Library
+- **Backend**: `cargo test`
+- **Run before PR**: `npm run check:all`
+
+## Submitting Changes
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-feature`
+3. Make your changes
+4. Run `npm run check:all` - all checks must pass
+5. Commit with clear messages
+6. Push and open a Pull Request
+
+## Documentation
+
+- `docs/developer/architecture-guide.md` - High-level architecture
+- `docs/developer/state-management.md` - State patterns
+- `docs/developer/command-system.md` - Command architecture
+- `docs/developer/testing.md` - Testing guidelines
+
+## Questions?
+
+Open an issue or reach out to [@heyandras](https://x.com/heyandras).

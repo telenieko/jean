@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { FileIcon } from 'lucide-react'
 import {
   Command,
@@ -12,6 +12,12 @@ import { useWorktreeFiles } from '@/services/files'
 import type { WorktreeFile, PendingFile } from '@/types/chat'
 import { cn } from '@/lib/utils'
 import { getExtensionColor } from '@/lib/file-colors'
+
+export interface FileMentionPopoverHandle {
+  moveUp: () => void
+  moveDown: () => void
+  selectCurrent: () => void
+}
 
 interface FileMentionPopoverProps {
   /** Worktree path for file listing */
@@ -28,6 +34,8 @@ interface FileMentionPopoverProps {
   anchorPosition: { top: number; left: number } | null
   /** Reference to the container for positioning (reserved for future use) */
   containerRef?: React.RefObject<HTMLElement | null>
+  /** Ref to expose navigation methods to parent */
+  handleRef?: React.RefObject<FileMentionPopoverHandle | null>
 }
 
 export function FileMentionPopover({
@@ -37,6 +45,7 @@ export function FileMentionPopover({
   onSelectFile,
   searchQuery,
   anchorPosition,
+  handleRef,
 }: FileMentionPopoverProps) {
   const { data: files = [] } = useWorktreeFiles(worktreePath)
   const listRef = useRef<HTMLDivElement>(null)
@@ -73,57 +82,30 @@ export function FileMentionPopover({
     [onSelectFile, onOpenChange]
   )
 
-  // Handle keyboard navigation - exposed via ref
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent) => {
-      if (!open) return false
-
-      switch (e.key) {
-        case 'ArrowDown':
-          e.preventDefault()
-          e.stopPropagation()
-          e.stopImmediatePropagation()
-          setSelectedIndex(i => Math.min(i + 1, filteredFiles.length - 1))
-          return true
-        case 'ArrowUp':
-          e.preventDefault()
-          e.stopPropagation()
-          e.stopImmediatePropagation()
+  // Expose navigation methods via ref for parent to call
+  useImperativeHandle(
+    handleRef,
+    () => {
+      console.log('[FileMentionPopover] useImperativeHandle creating handle, filteredFiles.length:', filteredFiles.length)
+      return {
+        moveUp: () => {
+          console.log('[FileMentionPopover] moveUp called, current selectedIndex:', selectedIndex)
           setSelectedIndex(i => Math.max(i - 1, 0))
-          return true
-        case 'Enter':
-        case 'Tab':
-          e.preventDefault()
-          e.stopPropagation()
-          e.stopImmediatePropagation()
+        },
+        moveDown: () => {
+          console.log('[FileMentionPopover] moveDown called, current selectedIndex:', selectedIndex, 'max:', filteredFiles.length - 1)
+          setSelectedIndex(i => Math.min(i + 1, filteredFiles.length - 1))
+        },
+        selectCurrent: () => {
+          console.log('[FileMentionPopover] selectCurrent called, clampedSelectedIndex:', clampedSelectedIndex)
           if (filteredFiles[clampedSelectedIndex]) {
             handleSelect(filteredFiles[clampedSelectedIndex])
           }
-          return true
-        case 'Escape':
-          e.preventDefault()
-          e.stopPropagation()
-          e.stopImmediatePropagation()
-          onOpenChange(false)
-          return true
+        },
       }
-      return false
     },
-    [open, filteredFiles, clampedSelectedIndex, handleSelect, onOpenChange]
+    [filteredFiles, clampedSelectedIndex, handleSelect, selectedIndex]
   )
-
-  // Attach keyboard handler to document when open
-  useEffect(() => {
-    if (!open) return
-
-    const handler = (e: KeyboardEvent) => {
-      handleKeyDown(e)
-    }
-
-    document.addEventListener('keydown', handler, { capture: true })
-    return () =>
-      document.removeEventListener('keydown', handler, { capture: true })
-  }, [open, handleKeyDown])
 
   // Scroll selected item into view
   useEffect(() => {
@@ -162,26 +144,33 @@ export function FileMentionPopover({
               <CommandEmpty>No files found</CommandEmpty>
             ) : (
               <CommandGroup>
-                {filteredFiles.map((file, index) => (
-                  <CommandItem
-                    key={file.relative_path}
-                    data-index={index}
-                    data-selected={index === clampedSelectedIndex}
-                    value={file.relative_path}
-                    onSelect={() => handleSelect(file)}
-                    className="flex items-center gap-2 cursor-pointer"
-                  >
-                    <FileIcon
+                {filteredFiles.map((file, index) => {
+                  const isSelected = index === clampedSelectedIndex
+                  return (
+                    <CommandItem
+                      key={file.relative_path}
+                      data-index={index}
+                      value={file.relative_path}
+                      onSelect={() => handleSelect(file)}
                       className={cn(
-                        'h-4 w-4 shrink-0',
-                        getExtensionColor(file.extension)
+                        'flex items-center gap-2 cursor-pointer',
+                        // Override cmdk's internal selection styling - we manage selection ourselves
+                        'data-[selected=true]:bg-transparent data-[selected=true]:text-foreground',
+                        isSelected && '!bg-accent !text-accent-foreground'
                       )}
-                    />
-                    <span className="truncate text-sm">
-                      {file.relative_path}
-                    </span>
-                  </CommandItem>
-                ))}
+                    >
+                      <FileIcon
+                        className={cn(
+                          'h-4 w-4 shrink-0',
+                          getExtensionColor(file.extension)
+                        )}
+                      />
+                      <span className="truncate text-sm">
+                        {file.relative_path}
+                      </span>
+                    </CommandItem>
+                  )
+                })}
               </CommandGroup>
             )}
           </CommandList>

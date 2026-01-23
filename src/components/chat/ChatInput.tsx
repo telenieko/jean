@@ -12,8 +12,11 @@ import type {
   SaveTextResponse,
   ExecutionMode,
 } from '@/types/chat'
-import { FileMentionPopover } from './FileMentionPopover'
-import { SlashPopover } from './SlashPopover'
+import {
+  FileMentionPopover,
+  type FileMentionPopoverHandle,
+} from './FileMentionPopover'
+import { SlashPopover, type SlashPopoverHandle } from './SlashPopover'
 
 /** Maximum image size in bytes (10MB) */
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024
@@ -83,12 +86,11 @@ export const ChatInput = memo(function ChatInput({
     left: number
   } | null>(null)
   const [slashTriggerIndex, setSlashTriggerIndex] = useState<number | null>(null)
-  // Ref to hold the selectFirst function registered by SlashPopover
-  const slashSelectFirstRef = useRef<(() => void) | null>(null)
-  // Callback for SlashPopover to register its selectFirst function
-  const handleRegisterSlashSelectFirst = useCallback((fn: () => void) => {
-    slashSelectFirstRef.current = fn
-  }, [])
+
+  // Refs to expose navigation methods from popovers
+  const fileMentionHandleRef = useRef<FileMentionPopoverHandle | null>(null)
+  const slashPopoverHandleRef = useRef<SlashPopoverHandle | null>(null)
+
   // Track empty state for showing keyboard hint (only re-renders at boundary)
   const [showHint, setShowHint] = useState(() => {
     // Lazy initializer - check draft on mount
@@ -324,34 +326,68 @@ export const ChatInput = memo(function ChatInput({
   // Handle keyboard events
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      // When file mention popover is open, don't handle Enter/Tab/Escape here
+      console.log('[ChatInput] handleKeyDown:', {
+        key: e.key,
+        fileMentionOpen,
+        slashPopoverOpen,
+        fileMentionHandleRef: !!fileMentionHandleRef.current,
+        slashPopoverHandleRef: !!slashPopoverHandleRef.current,
+      })
+
+      // When file mention popover is open, handle navigation
       if (fileMentionOpen) {
-        if (
-          e.key === 'Enter' ||
-          e.key === 'Tab' ||
-          e.key === 'Escape' ||
-          e.key === 'ArrowDown' ||
-          e.key === 'ArrowUp'
-        ) {
-          e.preventDefault()
-          return
+        console.log('[ChatInput] File mention popover open, handling key:', e.key)
+        switch (e.key) {
+          case 'ArrowDown':
+            e.preventDefault()
+            console.log('[ChatInput] Calling fileMentionHandleRef.moveDown()')
+            fileMentionHandleRef.current?.moveDown()
+            return
+          case 'ArrowUp':
+            e.preventDefault()
+            console.log('[ChatInput] Calling fileMentionHandleRef.moveUp()')
+            fileMentionHandleRef.current?.moveUp()
+            return
+          case 'Enter':
+          case 'Tab':
+            e.preventDefault()
+            console.log('[ChatInput] Calling fileMentionHandleRef.selectCurrent()')
+            fileMentionHandleRef.current?.selectCurrent()
+            return
+          case 'Escape':
+            e.preventDefault()
+            setFileMentionOpen(false)
+            setFileMentionQuery('')
+            return
         }
       }
 
-      // Handle slash popover keyboard events
+      // When slash popover is open, handle navigation
       if (slashPopoverOpen) {
-        if (e.key === 'Enter' || e.key === 'Tab') {
-          e.preventDefault()
-          // Call the registered selectFirst function from SlashPopover
-          slashSelectFirstRef.current?.()
-          return
-        }
-        if (e.key === 'Escape') {
-          e.preventDefault()
-          setSlashPopoverOpen(false)
-          setSlashTriggerIndex(null)
-          setSlashQuery('')
-          return
+        console.log('[ChatInput] Slash popover open, handling key:', e.key)
+        switch (e.key) {
+          case 'ArrowDown':
+            e.preventDefault()
+            console.log('[ChatInput] Calling slashPopoverHandleRef.moveDown()')
+            slashPopoverHandleRef.current?.moveDown()
+            return
+          case 'ArrowUp':
+            e.preventDefault()
+            console.log('[ChatInput] Calling slashPopoverHandleRef.moveUp()')
+            slashPopoverHandleRef.current?.moveUp()
+            return
+          case 'Enter':
+          case 'Tab':
+            e.preventDefault()
+            console.log('[ChatInput] Calling slashPopoverHandleRef.selectCurrent()')
+            slashPopoverHandleRef.current?.selectCurrent()
+            return
+          case 'Escape':
+            e.preventDefault()
+            setSlashPopoverOpen(false)
+            setSlashTriggerIndex(null)
+            setSlashQuery('')
+            return
         }
       }
 
@@ -654,6 +690,7 @@ export const ChatInput = memo(function ChatInput({
         searchQuery={fileMentionQuery}
         anchorPosition={fileMentionAnchor}
         containerRef={formRef}
+        handleRef={fileMentionHandleRef}
       />
 
       {/* Slash popover (/ commands and skills) */}
@@ -665,7 +702,7 @@ export const ChatInput = memo(function ChatInput({
         searchQuery={slashQuery}
         anchorPosition={slashAnchor}
         isAtPromptStart={isSlashAtPromptStart}
-        onRegisterSelectFirst={handleRegisterSlashSelectFirst}
+        handleRef={slashPopoverHandleRef}
       />
     </div>
   )

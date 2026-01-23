@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { Terminal, Wand2 } from 'lucide-react'
 import {
   Command,
@@ -10,6 +10,13 @@ import {
 import { Popover, PopoverContent, PopoverAnchor } from '@/components/ui/popover'
 import { useClaudeSkills, useClaudeCommands } from '@/services/skills'
 import type { ClaudeSkill, ClaudeCommand, PendingSkill } from '@/types/chat'
+import { cn } from '@/lib/utils'
+
+export interface SlashPopoverHandle {
+  moveUp: () => void
+  moveDown: () => void
+  selectCurrent: () => void
+}
 
 interface SlashPopoverProps {
   /** Whether the popover is open */
@@ -26,8 +33,8 @@ interface SlashPopoverProps {
   anchorPosition: { top: number; left: number } | null
   /** Whether slash is at prompt start (enables commands) */
   isAtPromptStart: boolean
-  /** Callback to register select-first function with parent */
-  onRegisterSelectFirst?: (selectFirst: () => void) => void
+  /** Ref to expose navigation methods to parent */
+  handleRef?: React.RefObject<SlashPopoverHandle | null>
 }
 
 type ListItem =
@@ -42,10 +49,12 @@ export function SlashPopover({
   searchQuery,
   anchorPosition,
   isAtPromptStart,
-  onRegisterSelectFirst,
+  handleRef,
 }: SlashPopoverProps) {
   const { data: skills = [] } = useClaudeSkills()
   const { data: commands = [] } = useClaudeCommands()
+  const listRef = useRef<HTMLDivElement>(null)
+  const [selectedIndex, setSelectedIndex] = useState(0)
 
   // Filter and combine items based on search query and context
   const filteredItems = useMemo(() => {
@@ -83,6 +92,12 @@ export function SlashPopover({
     return items.slice(0, 15) // Limit total to 15
   }, [skills, commands, searchQuery, isAtPromptStart])
 
+  // Clamp selectedIndex to valid range (handles case when filter reduces results)
+  const clampedSelectedIndex = Math.min(
+    selectedIndex,
+    Math.max(0, filteredItems.length - 1)
+  )
+
   const handleSelectSkill = useCallback(
     (skill: ClaudeSkill) => {
       const pendingSkill: PendingSkill = {
@@ -104,23 +119,51 @@ export function SlashPopover({
     [onSelectCommand, onOpenChange]
   )
 
-  // Create stable selectFirst function and register it with parent
-  // This allows parent to trigger selection without prop drilling or counter patterns
-  const selectFirst = useCallback(() => {
-    const firstItem = filteredItems[0]
-    if (!firstItem) return
+  // Handle selecting the currently highlighted item
+  const selectHighlighted = useCallback(() => {
+    const item = filteredItems[clampedSelectedIndex]
+    if (!item) return
 
-    if (firstItem.type === 'command') {
-      handleSelectCommand(firstItem.data)
+    if (item.type === 'command') {
+      handleSelectCommand(item.data)
     } else {
-      handleSelectSkill(firstItem.data)
+      handleSelectSkill(item.data)
     }
-  }, [filteredItems, handleSelectCommand, handleSelectSkill])
+  }, [filteredItems, clampedSelectedIndex, handleSelectCommand, handleSelectSkill])
 
-  // Register selectFirst with parent when it changes
+  // Expose navigation methods via ref for parent to call
+  useImperativeHandle(
+    handleRef,
+    () => {
+      console.log('[SlashPopover] useImperativeHandle creating handle, filteredItems.length:', filteredItems.length)
+      return {
+        moveUp: () => {
+          console.log('[SlashPopover] moveUp called, current selectedIndex:', selectedIndex)
+          setSelectedIndex(i => Math.max(i - 1, 0))
+        },
+        moveDown: () => {
+          console.log('[SlashPopover] moveDown called, current selectedIndex:', selectedIndex, 'max:', filteredItems.length - 1)
+          setSelectedIndex(i => Math.min(i + 1, filteredItems.length - 1))
+        },
+        selectCurrent: () => {
+          console.log('[SlashPopover] selectCurrent called, clampedSelectedIndex:', clampedSelectedIndex)
+          selectHighlighted()
+        },
+      }
+    },
+    [filteredItems.length, selectHighlighted, selectedIndex, clampedSelectedIndex]
+  )
+
+  // Scroll selected item into view
   useEffect(() => {
-    onRegisterSelectFirst?.(selectFirst)
-  }, [onRegisterSelectFirst, selectFirst])
+    const list = listRef.current
+    if (!list) return
+
+    const selectedItem = list.querySelector(
+      `[data-index="${clampedSelectedIndex}"]`
+    )
+    selectedItem?.scrollIntoView({ block: 'nearest' })
+  }, [clampedSelectedIndex])
 
   if (!open || !anchorPosition) return null
 
@@ -147,57 +190,79 @@ export function SlashPopover({
         onCloseAutoFocus={e => e.preventDefault()}
       >
         <Command shouldFilter={false}>
-          <CommandList className="max-h-[250px]">
+          <CommandList ref={listRef} className="max-h-[250px]">
             {filteredItems.length === 0 ? (
               <CommandEmpty>No commands or skills found</CommandEmpty>
             ) : (
               <>
                 {commandItems.length > 0 && (
                   <CommandGroup heading="Commands">
-                    {commandItems.map(item => (
-                      <CommandItem
-                        key={`cmd-${item.data.name}`}
-                        value={`cmd-${item.data.name}`}
-                        onSelect={() => handleSelectCommand(item.data)}
-                        className="flex items-center gap-2 cursor-pointer"
-                      >
-                        <Terminal className="h-4 w-4 shrink-0 text-blue-500" />
-                        <div className="flex flex-col min-w-0">
-                          <span className="truncate text-sm font-medium">
-                            /{item.data.name}
-                          </span>
-                          {item.data.description && (
-                            <span className="truncate text-xs text-muted-foreground">
-                              {item.data.description}
-                            </span>
+                    {commandItems.map((item, localIndex) => {
+                      // Commands come first in filteredItems, so localIndex = globalIndex
+                      const globalIndex = localIndex
+                      const isSelected = globalIndex === clampedSelectedIndex
+                      return (
+                        <CommandItem
+                          key={`cmd-${item.data.name}`}
+                          data-index={globalIndex}
+                          value={`cmd-${item.data.name}`}
+                          onSelect={() => handleSelectCommand(item.data)}
+                          className={cn(
+                            'flex items-center gap-2 cursor-pointer',
+                            // Override cmdk's internal selection styling - we manage selection ourselves
+                            'data-[selected=true]:bg-transparent data-[selected=true]:text-foreground',
+                            isSelected && '!bg-accent !text-accent-foreground'
                           )}
-                        </div>
-                      </CommandItem>
-                    ))}
+                        >
+                          <Terminal className="h-4 w-4 shrink-0 text-blue-500" />
+                          <div className="flex flex-col min-w-0">
+                            <span className="truncate text-sm font-medium">
+                              /{item.data.name}
+                            </span>
+                            {item.data.description && (
+                              <span className="truncate text-xs text-muted-foreground">
+                                {item.data.description}
+                              </span>
+                            )}
+                          </div>
+                        </CommandItem>
+                      )
+                    })}
                   </CommandGroup>
                 )}
                 {skillItems.length > 0 && (
                   <CommandGroup heading="Skills">
-                    {skillItems.map(item => (
-                      <CommandItem
-                        key={`skill-${item.data.name}`}
-                        value={`skill-${item.data.name}`}
-                        onSelect={() => handleSelectSkill(item.data)}
-                        className="flex items-center gap-2 cursor-pointer"
-                      >
-                        <Wand2 className="h-4 w-4 shrink-0 text-purple-500" />
-                        <div className="flex flex-col min-w-0">
-                          <span className="truncate text-sm font-medium">
-                            /{item.data.name}
-                          </span>
-                          {item.data.description && (
-                            <span className="truncate text-xs text-muted-foreground">
-                              {item.data.description}
-                            </span>
+                    {skillItems.map((item, localIndex) => {
+                      // Skills come after commands, so globalIndex = commandItems.length + localIndex
+                      const globalIndex = commandItems.length + localIndex
+                      const isSelected = globalIndex === clampedSelectedIndex
+                      return (
+                        <CommandItem
+                          key={`skill-${item.data.name}`}
+                          data-index={globalIndex}
+                          value={`skill-${item.data.name}`}
+                          onSelect={() => handleSelectSkill(item.data)}
+                          className={cn(
+                            'flex items-center gap-2 cursor-pointer',
+                            // Override cmdk's internal selection styling - we manage selection ourselves
+                            'data-[selected=true]:bg-transparent data-[selected=true]:text-foreground',
+                            isSelected && '!bg-accent !text-accent-foreground'
                           )}
-                        </div>
-                      </CommandItem>
-                    ))}
+                        >
+                          <Wand2 className="h-4 w-4 shrink-0 text-purple-500" />
+                          <div className="flex flex-col min-w-0">
+                            <span className="truncate text-sm font-medium">
+                              /{item.data.name}
+                            </span>
+                            {item.data.description && (
+                              <span className="truncate text-xs text-muted-foreground">
+                                {item.data.description}
+                              </span>
+                            )}
+                          </div>
+                        </CommandItem>
+                      )
+                    })}
                   </CommandGroup>
                 )}
               </>

@@ -14,6 +14,10 @@ Jean (Claude haha) is an AI assistant application that helps you to manage multi
 - Add [Opencode](https://opencode.ai/) support
 - Add remote access support through an API
 
+# Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+
 ---
 
 Made by [Andras Bacsai](https://x.com/heyandras).
