@@ -1,6 +1,10 @@
-import { X, Minus, Maximize2, Maximize, Minimize2 } from 'lucide-react'
+import { Maximize, Maximize2, Minimize2, Minus, X } from 'lucide-react'
 import type { AppCommand } from './types'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { invoke } from '@tauri-apps/api/core'
+
+const isWindows =
+  typeof navigator !== 'undefined' && /Windows/.test(navigator.userAgent)
 
 export const windowCommands: AppCommand[] = [
   {
@@ -14,7 +18,29 @@ export const windowCommands: AppCommand[] = [
     execute: async context => {
       try {
         const appWindow = getCurrentWindow()
-        await appWindow.close()
+        // On Windows, close() doesn't work reliably with custom titlebars
+        // We need to use destroy() but must check for running sessions first
+        if (isWindows) {
+          // Check for running sessions (same logic as onCloseRequested handler)
+          // Only check in production mode
+          if (!import.meta.env.DEV) {
+            try {
+              const hasRunning = await invoke<boolean>('has_running_sessions')
+              if (hasRunning) {
+                // Trigger the quit confirmation dialog
+                window.dispatchEvent(
+                  new CustomEvent('quit-confirmation-requested')
+                )
+                return
+              }
+            } catch {
+              // Allow quit if we can't check (fail open)
+            }
+          }
+          await appWindow.destroy()
+        } else {
+          await appWindow.close()
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error'
         context.showToast(`Failed to close window: ${message}`, 'error')

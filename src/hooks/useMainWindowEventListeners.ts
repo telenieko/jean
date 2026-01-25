@@ -5,7 +5,7 @@ import { check } from '@tauri-apps/plugin-updater'
 import { message } from '@tauri-apps/plugin-dialog'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
-import { useQueryClient, type QueryClient } from '@tanstack/react-query'
+import { type QueryClient, useQueryClient } from '@tanstack/react-query'
 import { useUIStore } from '@/store/ui-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { useChatStore } from '@/store/chat-store'
@@ -16,8 +16,8 @@ import { useCommandContext } from './use-command-context'
 import { usePreferences } from '@/services/preferences'
 import { logger } from '@/lib/logger'
 import {
-  eventToShortcutString,
   DEFAULT_KEYBINDINGS,
+  eventToShortcutString,
   type KeybindingAction,
   type KeybindingsMap,
 } from '@/types/keybindings'
@@ -480,15 +480,23 @@ export function useMainWindowEventListeners() {
 
     getCurrentWindow()
       .onCloseRequested(async event => {
+        // IMPORTANT: Must call preventDefault() synchronously before any await
+        // Otherwise Tauri may proceed with the close before we can stop it
+        event.preventDefault()
+
         try {
           const hasRunning = await invoke<boolean>('has_running_sessions')
           if (hasRunning) {
-            event.preventDefault()
+            // Show confirmation dialog - user can choose to quit anyway
             window.dispatchEvent(new CustomEvent('quit-confirmation-requested'))
+          } else {
+            // No running sessions, safe to close
+            await getCurrentWindow().destroy()
           }
         } catch (error) {
           logger.error('Failed to check running sessions', { error })
           // Allow quit if we can't check (fail open)
+          await getCurrentWindow().destroy()
         }
       })
       .then(fn => {
