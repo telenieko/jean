@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -82,17 +82,19 @@ pub fn get_pr_status(
     log::trace!("Fetching PR status for #{pr_number} in {repo_path}");
 
     // Run gh pr view
-    let output = Command::new("gh")
-        .args([
+    let pr_num_str = pr_number.to_string();
+    let output = crate::gh_cli::create_gh_command(
+        &[
             "pr",
             "view",
-            &pr_number.to_string(),
+            &pr_num_str,
             "--json",
             "state,isDraft,reviewDecision,statusCheckRollup",
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to run gh pr view: {e}"))?;
+        ],
+        Path::new(repo_path),
+    )?
+    .output()
+    .map_err(|e| format!("Failed to run gh pr view: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -3,6 +3,9 @@
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+#[cfg(windows)]
+use std::process::Command;
+
 /// Directory name for storing the GitHub CLI binary
 pub const GH_CLI_DIR_NAME: &str = "gh-cli";
 
@@ -40,4 +43,67 @@ pub fn ensure_gh_cli_dir(app: &AppHandle) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&cli_dir)
         .map_err(|e| format!("Failed to create GitHub CLI directory: {e}"))?;
     Ok(cli_dir)
+}
+
+// === WSL Support (Windows only) ===
+
+/// Name of the GitHub CLI binary inside WSL (always Linux binary)
+#[cfg(windows)]
+pub const WSL_GH_BINARY_NAME: &str = "gh";
+
+/// Get the WSL home directory by querying WSL
+#[cfg(windows)]
+fn get_wsl_home() -> Result<String, String> {
+    let output = Command::new("wsl")
+        .args(["-e", "bash", "-c", "echo $HOME"])
+        .output()
+        .map_err(|e| format!("Failed to get WSL home directory: {e}"))?;
+
+    if !output.status.success() {
+        return Err("Failed to get WSL home directory".to_string());
+    }
+
+    let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if home.is_empty() {
+        return Err("WSL home directory is empty".to_string());
+    }
+
+    Ok(home)
+}
+
+/// Get the WSL directory where GitHub CLI should be installed
+///
+/// Returns: `~/.local/bin` (inside WSL's native ext4 filesystem)
+#[cfg(windows)]
+pub fn get_wsl_gh_cli_dir() -> Result<String, String> {
+    let home = get_wsl_home()?;
+    Ok(format!("{home}/.local/bin"))
+}
+
+/// Get the WSL path to the GitHub CLI binary
+///
+/// Returns: `~/.local/bin/gh` (inside WSL's native ext4 filesystem)
+#[cfg(windows)]
+pub fn get_wsl_gh_cli_binary_path() -> Result<String, String> {
+    let dir = get_wsl_gh_cli_dir()?;
+    Ok(format!("{dir}/{WSL_GH_BINARY_NAME}"))
+}
+
+/// Ensure the WSL GitHub CLI directory exists
+#[cfg(windows)]
+pub fn ensure_wsl_gh_cli_dir() -> Result<String, String> {
+    let dir = get_wsl_gh_cli_dir()?;
+    let output = Command::new("wsl")
+        .args(["-e", "mkdir", "-p", &dir])
+        .output()
+        .map_err(|e| format!("Failed to create WSL GitHub CLI directory: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to create WSL GitHub CLI directory: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(dir)
 }

@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
@@ -84,8 +83,8 @@ pub async fn list_github_issues(
     let state_arg = state.unwrap_or_else(|| "open".to_string());
 
     // Run gh issue list
-    let output = Command::new("gh")
-        .args([
+    let output = crate::gh_cli::create_gh_command(
+        &[
             "issue",
             "list",
             "--json",
@@ -94,10 +93,11 @@ pub async fn list_github_issues(
             "100",
             "--state",
             &state_arg,
-        ])
-        .current_dir(&project_path)
-        .output()
-        .map_err(|e| format!("Failed to run gh issue list: {e}"))?;
+        ],
+        Path::new(&project_path),
+    )?
+    .output()
+    .map_err(|e| format!("Failed to run gh issue list: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -133,17 +133,19 @@ pub async fn get_github_issue(
     log::trace!("Getting GitHub issue #{issue_number} for {project_path}");
 
     // Run gh issue view
-    let output = Command::new("gh")
-        .args([
+    let issue_num_str = issue_number.to_string();
+    let output = crate::gh_cli::create_gh_command(
+        &[
             "issue",
             "view",
-            &issue_number.to_string(),
+            &issue_num_str,
             "--json",
             "number,title,body,state,labels,createdAt,author,comments",
-        ])
-        .current_dir(&project_path)
-        .output()
-        .map_err(|e| format!("Failed to run gh issue view: {e}"))?;
+        ],
+        Path::new(&project_path),
+    )?
+    .output()
+    .map_err(|e| format!("Failed to run gh issue view: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -843,8 +845,8 @@ pub async fn list_github_prs(
     let state_arg = state.unwrap_or_else(|| "open".to_string());
 
     // Run gh pr list
-    let output = Command::new("gh")
-        .args([
+    let output = crate::gh_cli::create_gh_command(
+        &[
             "pr",
             "list",
             "--json",
@@ -853,10 +855,11 @@ pub async fn list_github_prs(
             "100",
             "--state",
             &state_arg,
-        ])
-        .current_dir(&project_path)
-        .output()
-        .map_err(|e| format!("Failed to run gh pr list: {e}"))?;
+        ],
+        Path::new(&project_path),
+    )?
+    .output()
+    .map_err(|e| format!("Failed to run gh pr list: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -891,17 +894,19 @@ pub async fn get_github_pr(
     log::trace!("Getting GitHub PR #{pr_number} for {project_path}");
 
     // Run gh pr view
-    let output = Command::new("gh")
-        .args([
+    let pr_num_str = pr_number.to_string();
+    let output = crate::gh_cli::create_gh_command(
+        &[
             "pr",
             "view",
-            &pr_number.to_string(),
+            &pr_num_str,
             "--json",
             "number,title,body,state,headRefName,baseRefName,isDraft,createdAt,author,labels,comments,reviews",
-        ])
-        .current_dir(&project_path)
-        .output()
-        .map_err(|e| format!("Failed to run gh pr view: {e}"))?;
+        ],
+        Path::new(&project_path),
+    )?
+    .output()
+    .map_err(|e| format!("Failed to run gh pr view: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1010,11 +1015,13 @@ pub fn format_pr_context_markdown(ctx: &PullRequestContext) -> String {
 pub fn get_pr_diff(project_path: &str, pr_number: u32) -> Result<String, String> {
     log::debug!("Fetching diff for PR #{pr_number} in {project_path}");
 
-    let output = Command::new("gh")
-        .args(["pr", "diff", &pr_number.to_string(), "--color", "never"])
-        .current_dir(project_path)
-        .output()
-        .map_err(|e| format!("Failed to run gh pr diff: {e}"))?;
+    let pr_num_str = pr_number.to_string();
+    let output = crate::gh_cli::create_gh_command(
+        &["pr", "diff", &pr_num_str, "--color", "never"],
+        Path::new(project_path),
+    )?
+    .output()
+    .map_err(|e| format!("Failed to run gh pr diff: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

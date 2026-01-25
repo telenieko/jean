@@ -25,6 +25,10 @@ use super::types::{
     WorktreePermanentlyDeletedEvent, WorktreeUnarchivedEvent,
 };
 use crate::claude_cli::get_cli_binary_path;
+use crate::gh_cli::create_gh_command;
+use crate::platform::shell::{
+    create_git_command, git_dir_exists, path_exists, path_is_dir, windows_to_wsl_path,
+};
 
 /// Get current Unix timestamp
 fn now() -> u64 {
@@ -53,10 +57,12 @@ pub async fn add_project(
 
     // Validate it's a git repository
     if !git::validate_git_repo(&path)? {
+        // Show WSL-converted path in error message for better UX
+        let display_path = windows_to_wsl_path(&path);
         return Err(format!(
             "The selected folder is not a git repository.\n\n\
             To add this project, first initialize it as a git repository by running:\n\
-            cd \"{path}\" && git init"
+            cd \"{display_path}\" && git init"
         ));
     }
 
@@ -105,25 +111,22 @@ pub async fn add_project(
 pub async fn init_git_in_folder(path: String) -> Result<String, String> {
     log::trace!("Initializing git in existing folder: {path}");
 
-    // Validate path exists
-    let path_obj = std::path::Path::new(&path);
-    if !path_obj.exists() {
+    // Validate path exists (works with WSL UNC paths)
+    if !path_exists(&path)? {
         return Err(format!("Path does not exist: {path}"));
     }
-    if !path_obj.is_dir() {
+    if !path_is_dir(&path)? {
         return Err(format!("Path is not a directory: {path}"));
     }
 
-    // Check if already a git repo
-    let git_path = path_obj.join(".git");
-    let already_git_repo = git_path.exists();
+    // Check if already a git repo (works with WSL UNC paths)
+    let path_obj = std::path::Path::new(&path);
+    let already_git_repo = git_dir_exists(&path)?;
 
     if already_git_repo {
         // Check if it has any commits (HEAD exists)
-        let has_commits = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&path)
-            .output()
+        let has_commits = create_git_command(&["rev-parse", "HEAD"], path_obj)
+            .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()))
             .map(|o| o.status.success())
             .unwrap_or(false);
 
@@ -136,9 +139,7 @@ pub async fn init_git_in_folder(path: String) -> Result<String, String> {
 
     // Run git init (skip if already a git repo)
     if !already_git_repo {
-        let output = std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(&path)
+        let output = create_git_command(&["init"], path_obj)?
             .output()
             .map_err(|e| format!("Failed to run git init: {e}"))?;
 
@@ -149,9 +150,7 @@ pub async fn init_git_in_folder(path: String) -> Result<String, String> {
     }
 
     // Stage all files
-    let add_output = std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(&path)
+    let add_output = create_git_command(&["add", "."], path_obj)?
         .output()
         .map_err(|e| format!("Failed to run git add: {e}"))?;
 
@@ -161,9 +160,7 @@ pub async fn init_git_in_folder(path: String) -> Result<String, String> {
     }
 
     // Create initial commit
-    let commit_output = std::process::Command::new("git")
-        .args(["commit", "-m", "Initial commit"])
-        .current_dir(&path)
+    let commit_output = create_git_command(&["commit", "-m", "Initial commit"], path_obj)?
         .output()
         .map_err(|e| format!("Failed to run git commit: {e}"))?;
 
@@ -175,11 +172,10 @@ pub async fn init_git_in_folder(path: String) -> Result<String, String> {
         if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
             log::warn!("No files to commit, creating empty initial commit");
             // Create an empty commit with --allow-empty
-            let empty_commit = std::process::Command::new("git")
-                .args(["commit", "--allow-empty", "-m", "Initial commit"])
-                .current_dir(&path)
-                .output()
-                .map_err(|e| format!("Failed to create empty commit: {e}"))?;
+            let empty_commit =
+                create_git_command(&["commit", "--allow-empty", "-m", "Initial commit"], path_obj)?
+                    .output()
+                    .map_err(|e| format!("Failed to create empty commit: {e}"))?;
 
             if !empty_commit.status.success() {
                 let empty_stderr = String::from_utf8_lossy(&empty_commit.stderr);
@@ -2499,9 +2495,9 @@ pub async fn get_review_prompt(
     let current_branch = git::get_current_branch(&worktree_path)?;
 
     // Get the full git diff (origin/target...HEAD)
-    let diff_output = std::process::Command::new("git")
-        .args(["diff", &format!("origin/{target_branch}...HEAD")])
-        .current_dir(&worktree_path)
+    let worktree_path_obj = Path::new(&worktree_path);
+    let diff_ref = format!("origin/{target_branch}...HEAD");
+    let diff_output = create_git_command(&["diff", &diff_ref], worktree_path_obj)?
         .output()
         .map_err(|e| format!("Failed to run git diff: {e}"))?;
 
@@ -2513,15 +2509,13 @@ pub async fn get_review_prompt(
     };
 
     // Get the commit history (origin/target..HEAD)
-    let log_output = std::process::Command::new("git")
-        .args([
-            "log",
-            &format!("origin/{target_branch}..HEAD"),
-            "--pretty=format:%h %s",
-        ])
-        .current_dir(&worktree_path)
-        .output()
-        .map_err(|e| format!("Failed to run git log: {e}"))?;
+    let log_ref = format!("origin/{target_branch}..HEAD");
+    let log_output = create_git_command(
+        &["log", &log_ref, "--pretty=format:%h %s"],
+        worktree_path_obj,
+    )?
+    .output()
+    .map_err(|e| format!("Failed to run git log: {e}"))?;
 
     let commit_history = if log_output.status.success() {
         String::from_utf8_lossy(&log_output.stdout).to_string()
@@ -2531,9 +2525,7 @@ pub async fn get_review_prompt(
     };
 
     // Get uncommitted changes (staged + unstaged for tracked files)
-    let uncommitted_output = std::process::Command::new("git")
-        .args(["diff", "HEAD"])
-        .current_dir(&worktree_path)
+    let uncommitted_output = create_git_command(&["diff", "HEAD"], worktree_path_obj)?
         .output()
         .map_err(|e| format!("Failed to run git diff HEAD: {e}"))?;
 
@@ -2544,11 +2536,12 @@ pub async fn get_review_prompt(
     };
 
     // Get list of untracked files
-    let untracked_output = std::process::Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .current_dir(&worktree_path)
-        .output()
-        .map_err(|e| format!("Failed to list untracked files: {e}"))?;
+    let untracked_output = create_git_command(
+        &["ls-files", "--others", "--exclude-standard"],
+        worktree_path_obj,
+    )?
+    .output()
+    .map_err(|e| format!("Failed to list untracked files: {e}"))?;
 
     let untracked_files: Vec<String> = if untracked_output.status.success() {
         String::from_utf8_lossy(&untracked_output.stdout)
@@ -2985,9 +2978,9 @@ fn extract_structured_output(output: &str) -> Result<String, String> {
 
 /// Get git diff between current branch and target branch
 fn get_branch_diff(repo_path: &str, target_branch: &str) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(["diff", &format!("origin/{target_branch}...HEAD")])
-        .current_dir(repo_path)
+    let repo_path_obj = Path::new(repo_path);
+    let diff_ref = format!("origin/{target_branch}...HEAD");
+    let output = create_git_command(&["diff", &diff_ref], repo_path_obj)?
         .output()
         .map_err(|e| format!("Failed to get git diff: {e}"))?;
 
@@ -3012,9 +3005,9 @@ fn get_branch_diff(repo_path: &str, target_branch: &str) -> Result<String, Strin
 
 /// Get commit messages between current branch and target branch
 fn get_branch_commits(repo_path: &str, target_branch: &str) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(["log", "--oneline", &format!("origin/{target_branch}..HEAD")])
-        .current_dir(repo_path)
+    let repo_path_obj = Path::new(repo_path);
+    let log_ref = format!("origin/{target_branch}..HEAD");
+    let output = create_git_command(&["log", "--oneline", &log_ref], repo_path_obj)?
         .output()
         .map_err(|e| format!("Failed to get git log: {e}"))?;
 
@@ -3028,13 +3021,9 @@ fn get_branch_commits(repo_path: &str, target_branch: &str) -> Result<String, St
 
 /// Count commits between current branch and target branch
 fn count_branch_commits(repo_path: &str, target_branch: &str) -> Result<u32, String> {
-    let output = Command::new("git")
-        .args([
-            "rev-list",
-            "--count",
-            &format!("origin/{target_branch}..HEAD"),
-        ])
-        .current_dir(repo_path)
+    let repo_path_obj = Path::new(repo_path);
+    let count_ref = format!("origin/{target_branch}..HEAD");
+    let output = create_git_command(&["rev-list", "--count", &count_ref], repo_path_obj)?
         .output()
         .map_err(|e| format!("Failed to count commits: {e}"))?;
 
@@ -3205,13 +3194,12 @@ pub async fn create_pr_with_ai_content(
 
     // Stage and commit uncommitted changes if any
     let uncommitted = git::get_uncommitted_count(&worktree_path)?;
+    let worktree_path_obj = Path::new(&worktree_path);
     if uncommitted > 0 {
         log::trace!("Staging and committing {uncommitted} uncommitted changes");
 
         // Stage all changes
-        let stage_output = Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(&worktree_path)
+        let stage_output = create_git_command(&["add", "-A"], worktree_path_obj)?
             .output()
             .map_err(|e| format!("Failed to stage changes: {e}"))?;
 
@@ -3221,11 +3209,10 @@ pub async fn create_pr_with_ai_content(
         }
 
         // Commit with a generic message (the PR will have the real description)
-        let commit_output = Command::new("git")
-            .args(["commit", "-m", "chore: prepare for PR"])
-            .current_dir(&worktree_path)
-            .output()
-            .map_err(|e| format!("Failed to commit: {e}"))?;
+        let commit_output =
+            create_git_command(&["commit", "-m", "chore: prepare for PR"], worktree_path_obj)?
+                .output()
+                .map_err(|e| format!("Failed to commit: {e}"))?;
 
         if !commit_output.status.success() {
             let stderr = String::from_utf8_lossy(&commit_output.stderr);
@@ -3238,9 +3225,7 @@ pub async fn create_pr_with_ai_content(
 
     // Push the branch
     log::trace!("Pushing branch to remote");
-    let push_output = Command::new("git")
-        .args(["push", "-u", "origin", "HEAD"])
-        .current_dir(&worktree_path)
+    let push_output = create_git_command(&["push", "-u", "origin", "HEAD"], worktree_path_obj)?
         .output()
         .map_err(|e| format!("Failed to push: {e}"))?;
 
@@ -3265,8 +3250,8 @@ pub async fn create_pr_with_ai_content(
 
     // Create the PR using gh CLI
     log::trace!("Creating PR with gh CLI");
-    let output = Command::new("gh")
-        .args([
+    let output = create_gh_command(
+        &[
             "pr",
             "create",
             "--base",
@@ -3275,10 +3260,11 @@ pub async fn create_pr_with_ai_content(
             &pr_content.title,
             "--body",
             &pr_content.body,
-        ])
-        .current_dir(&worktree_path)
-        .output()
-        .map_err(|e| format!("Failed to run gh pr create: {e}"))?;
+        ],
+        worktree_path_obj,
+    )?
+    .output()
+    .map_err(|e| format!("Failed to run gh pr create: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3340,9 +3326,8 @@ pub struct CreateCommitResponse {
 
 /// Get git status output
 fn get_git_status(repo_path: &str) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(["status", "--short"])
-        .current_dir(repo_path)
+    let repo_path_obj = Path::new(repo_path);
+    let output = create_git_command(&["status", "--short"], repo_path_obj)?
         .output()
         .map_err(|e| format!("Failed to get git status: {e}"))?;
 
@@ -3351,9 +3336,8 @@ fn get_git_status(repo_path: &str) -> Result<String, String> {
 
 /// Get staged diff
 fn get_staged_diff(repo_path: &str) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(["diff", "--cached"])
-        .current_dir(repo_path)
+    let repo_path_obj = Path::new(repo_path);
+    let output = create_git_command(&["diff", "--cached"], repo_path_obj)?
         .output()
         .map_err(|e| format!("Failed to get staged diff: {e}"))?;
 
@@ -3373,9 +3357,9 @@ fn get_staged_diff(repo_path: &str) -> Result<String, String> {
 
 /// Get recent commit messages for style reference
 fn get_recent_commits(repo_path: &str, count: u32) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(["log", "--oneline", &format!("-{count}")])
-        .current_dir(repo_path)
+    let repo_path_obj = Path::new(repo_path);
+    let count_arg = format!("-{count}");
+    let output = create_git_command(&["log", "--oneline", &count_arg], repo_path_obj)?
         .output()
         .map_err(|e| format!("Failed to get recent commits: {e}"))?;
 
@@ -3384,9 +3368,8 @@ fn get_recent_commits(repo_path: &str, count: u32) -> Result<String, String> {
 
 /// Get remote info
 fn get_remote_info(repo_path: &str) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(["remote", "-v"])
-        .current_dir(repo_path)
+    let repo_path_obj = Path::new(repo_path);
+    let output = create_git_command(&["remote", "-v"], repo_path_obj)?
         .output()
         .map_err(|e| format!("Failed to get remote info: {e}"))?;
 
@@ -3395,9 +3378,8 @@ fn get_remote_info(repo_path: &str) -> Result<String, String> {
 
 /// Stage all changes
 fn stage_all_changes(repo_path: &str) -> Result<(), String> {
-    let output = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(repo_path)
+    let repo_path_obj = Path::new(repo_path);
+    let output = create_git_command(&["add", "-A"], repo_path_obj)?
         .output()
         .map_err(|e| format!("Failed to stage changes: {e}"))?;
 
@@ -3410,10 +3392,9 @@ fn stage_all_changes(repo_path: &str) -> Result<(), String> {
 }
 
 /// Create a git commit with the given message
-fn create_git_commit(repo_path: &str, message: &str) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(["commit", "-m", message])
-        .current_dir(repo_path)
+fn create_git_commit_cmd(repo_path: &str, message: &str) -> Result<String, String> {
+    let repo_path_obj = Path::new(repo_path);
+    let output = create_git_command(&["commit", "-m", message], repo_path_obj)?
         .output()
         .map_err(|e| format!("Failed to create commit: {e}"))?;
 
@@ -3423,9 +3404,7 @@ fn create_git_commit(repo_path: &str, message: &str) -> Result<String, String> {
     }
 
     // Get the commit hash
-    let hash_output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo_path)
+    let hash_output = create_git_command(&["rev-parse", "HEAD"], repo_path_obj)?
         .output()
         .map_err(|e| format!("Failed to get commit hash: {e}"))?;
 
@@ -3436,9 +3415,8 @@ fn create_git_commit(repo_path: &str, message: &str) -> Result<String, String> {
 
 /// Push to remote
 fn push_to_remote(repo_path: &str) -> Result<(), String> {
-    let output = Command::new("git")
-        .args(["push"])
-        .current_dir(repo_path)
+    let repo_path_obj = Path::new(repo_path);
+    let output = create_git_command(&["push"], repo_path_obj)?
         .output()
         .map_err(|e| format!("Failed to push: {e}"))?;
 
@@ -3575,7 +3553,7 @@ pub async fn create_commit_with_ai(
     );
 
     // 7. Create the commit
-    let commit_hash = create_git_commit(&worktree_path, &response.message)?;
+    let commit_hash = create_git_commit_cmd(&worktree_path, &response.message)?;
 
     log::trace!("Created commit: {commit_hash}");
 
@@ -3755,9 +3733,8 @@ pub async fn run_review_with_ai(
     let commits = get_branch_commits(&worktree_path, target_branch)?;
 
     // Get uncommitted changes
-    let uncommitted_output = Command::new("git")
-        .args(["diff", "HEAD"])
-        .current_dir(&worktree_path)
+    let worktree_path_obj = Path::new(&worktree_path);
+    let uncommitted_output = create_git_command(&["diff", "HEAD"], worktree_path_obj)?
         .output()
         .map_err(|e| format!("Failed to get uncommitted diff: {e}"))?;
 
@@ -3909,7 +3886,7 @@ pub async fn merge_worktree_to_base(
         match generate_commit_message(&app, &prompt) {
             Ok(response) => {
                 // Create the commit with AI-generated message
-                match create_git_commit(&worktree.path, &response.message) {
+                match create_git_commit_cmd(&worktree.path, &response.message) {
                     Ok(hash) => log::trace!("Auto-committed with AI message: {hash}"),
                     Err(e) => {
                         if !e.contains("Nothing to commit") && !e.contains("nothing to commit") {
@@ -3921,7 +3898,7 @@ pub async fn merge_worktree_to_base(
             Err(e) => {
                 // Fallback to simple commit message if AI fails
                 log::warn!("AI commit message generation failed, using fallback: {e}");
-                match create_git_commit(&worktree.path, "Auto-commit before merge") {
+                match create_git_commit_cmd(&worktree.path, "Auto-commit before merge") {
                     Ok(hash) => log::trace!("Auto-committed with fallback message: {hash}"),
                     Err(e) => {
                         if !e.contains("Nothing to commit") && !e.contains("nothing to commit") {

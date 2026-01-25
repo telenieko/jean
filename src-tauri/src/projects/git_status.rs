@@ -1,7 +1,9 @@
-use std::process::Command;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+
+use crate::platform::shell::create_git_command;
 
 /// Information about a worktree for polling
 #[derive(Debug, Clone)]
@@ -43,9 +45,7 @@ pub struct GitBranchStatus {
 fn fetch_origin_branch(repo_path: &str, branch: &str) -> Result<(), String> {
     log::trace!("Fetching origin/{branch} in {repo_path}");
 
-    let output = Command::new("git")
-        .args(["fetch", "origin", branch])
-        .current_dir(repo_path)
+    let output = create_git_command(&["fetch", "origin", branch], Path::new(repo_path))?
         .output()
         .map_err(|e| format!("Failed to run git fetch: {e}"))?;
 
@@ -68,9 +68,7 @@ fn fetch_origin_branch(repo_path: &str, branch: &str) -> Result<(), String> {
 
 /// Get the current branch name
 fn get_current_branch(repo_path: &str) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(repo_path)
+    let output = create_git_command(&["rev-parse", "--abbrev-ref", "HEAD"], Path::new(repo_path))?
         .output()
         .map_err(|e| format!("Failed to run git command: {e}"))?;
 
@@ -91,10 +89,8 @@ fn get_uncommitted_diff_stats(repo_path: &str) -> (u32, u32) {
 
     // 1. Get diff stats for unstaged changes (working directory vs index)
     // git diff --numstat outputs: "added<tab>removed<tab>filename" per line
-    let unstaged_output = Command::new("git")
-        .args(["diff", "--numstat"])
-        .current_dir(repo_path)
-        .output();
+    let unstaged_output = create_git_command(&["diff", "--numstat"], Path::new(repo_path))
+        .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     if let Ok(o) = unstaged_output {
         if o.status.success() {
@@ -112,10 +108,8 @@ fn get_uncommitted_diff_stats(repo_path: &str) -> (u32, u32) {
 
     // 2. Get diff stats for staged changes (index vs HEAD)
     // git diff --cached --numstat shows changes that have been `git add`ed
-    let staged_output = Command::new("git")
-        .args(["diff", "--cached", "--numstat"])
-        .current_dir(repo_path)
-        .output();
+    let staged_output = create_git_command(&["diff", "--cached", "--numstat"], Path::new(repo_path))
+        .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     if let Ok(o) = staged_output {
         if o.status.success() {
@@ -133,10 +127,8 @@ fn get_uncommitted_diff_stats(repo_path: &str) -> (u32, u32) {
 
     // 3. Get stats for untracked (new) files
     // List all untracked files
-    let untracked_output = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .current_dir(repo_path)
-        .output();
+    let untracked_output = create_git_command(&["ls-files", "--others", "--exclude-standard"], Path::new(repo_path))
+        .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     if let Ok(o) = untracked_output {
         if o.status.success() {
@@ -168,10 +160,8 @@ fn get_untracked_files_raw_patch(repo_path: &str) -> String {
     let mut raw_patch = String::new();
 
     // List all untracked files
-    let output = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .current_dir(repo_path)
-        .output();
+    let output = create_git_command(&["ls-files", "--others", "--exclude-standard"], Path::new(repo_path))
+        .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     let Ok(o) = output else {
         return raw_patch;
@@ -218,10 +208,8 @@ fn get_untracked_files_diff(repo_path: &str) -> Vec<DiffFile> {
     let mut untracked_files: Vec<DiffFile> = Vec::new();
 
     // List all untracked files
-    let output = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .current_dir(repo_path)
-        .output();
+    let output = create_git_command(&["ls-files", "--others", "--exclude-standard"], Path::new(repo_path))
+        .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     let Ok(o) = output else {
         return untracked_files;
@@ -299,10 +287,9 @@ fn get_untracked_files_diff(repo_path: &str) -> Vec<DiffFile> {
 fn get_branch_diff_stats(repo_path: &str, base_branch: &str) -> (u32, u32) {
     // git diff --numstat origin/main...HEAD shows changes in current branch vs base
     let origin_ref = format!("origin/{base_branch}");
-    let output = Command::new("git")
-        .args(["diff", "--numstat", &format!("{origin_ref}...HEAD")])
-        .current_dir(repo_path)
-        .output();
+    let diff_range = format!("{origin_ref}...HEAD");
+    let output = create_git_command(&["diff", "--numstat", &diff_range], Path::new(repo_path))
+        .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     match output {
         Ok(o) if o.status.success() => {
@@ -326,10 +313,9 @@ fn get_branch_diff_stats(repo_path: &str, base_branch: &str) -> (u32, u32) {
 /// Count commits between two refs
 /// Returns 0 if either ref doesn't exist
 fn count_commits_between(repo_path: &str, from_ref: &str, to_ref: &str) -> u32 {
-    let output = Command::new("git")
-        .args(["rev-list", "--count", &format!("{from_ref}..{to_ref}")])
-        .current_dir(repo_path)
-        .output();
+    let range = format!("{from_ref}..{to_ref}");
+    let output = create_git_command(&["rev-list", "--count", &range], Path::new(repo_path))
+        .and_then(|mut cmd| cmd.output().map_err(|e| e.to_string()));
 
     match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
@@ -465,9 +451,7 @@ pub fn get_git_diff(
         _ => return Err(format!("Invalid diff_type: {diff_type}")),
     };
 
-    let output = Command::new("git")
-        .args(&args)
-        .current_dir(repo_path)
+    let output = create_git_command(&args, Path::new(repo_path))?
         .output()
         .map_err(|e| format!("Failed to run git diff: {e}"))?;
 

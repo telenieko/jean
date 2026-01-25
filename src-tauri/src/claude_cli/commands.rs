@@ -3,9 +3,14 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Write;
+#[cfg(windows)]
+use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
 
+#[cfg(not(windows))]
 use super::config::{ensure_cli_dir, get_cli_binary_path};
+#[cfg(windows)]
+use super::config::{ensure_wsl_cli_dir, get_wsl_cli_binary_path};
 
 /// Extract semver version number from a version string
 /// Handles formats like: "1.0.28", "v1.0.28", "Claude CLI 1.0.28"
@@ -69,48 +74,118 @@ pub struct InstallProgress {
 
 /// Check if Claude CLI is installed and get its status
 #[tauri::command]
-pub async fn check_claude_cli_installed(app: AppHandle) -> Result<ClaudeCliStatus, String> {
+pub async fn check_claude_cli_installed(
+    #[allow(unused_variables)] app: AppHandle,
+) -> Result<ClaudeCliStatus, String> {
     log::trace!("Checking Claude CLI installation status");
 
-    let binary_path = get_cli_binary_path(&app)?;
+    // On Windows, check WSL path; on Unix, check local path
+    #[cfg(windows)]
+    {
+        use crate::platform::shell::is_wsl_available;
 
-    if !binary_path.exists() {
-        log::trace!("Claude CLI not found at {:?}", binary_path);
-        return Ok(ClaudeCliStatus {
-            installed: false,
-            version: None,
-            path: None,
-        });
-    }
+        if !is_wsl_available() {
+            return Err(
+                "WSL is required on Windows to run Claude CLI. \
+                 Install WSL with: wsl --install"
+                    .to_string(),
+            );
+        }
 
-    // Try to get the version by running claude --version
-    // Uses WSL on Windows, shell wrapper on Unix to bypass macOS security restrictions
-    let version = match execute_cli_command(&binary_path, "--version") {
-        Ok(output) => {
-            if output.status.success() {
-                let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                log::trace!("Claude CLI raw version output: {}", version_str);
-                // claude --version returns just the version number like "1.0.28"
-                // but handle any prefix like "v1.0.28" or "Claude CLI 1.0.28"
-                let version = extract_version_number(&version_str);
-                log::trace!("Claude CLI parsed version: {}", version);
-                Some(version)
-            } else {
-                log::warn!("Failed to get Claude CLI version");
+        let wsl_path = get_wsl_cli_binary_path()?;
+        log::trace!("Checking Claude CLI at WSL path: {}", wsl_path);
+
+        // Check if binary exists in WSL
+        let check_cmd = format!("test -x '{wsl_path}' && echo exists");
+        let output = Command::new("wsl")
+            .args(["-e", "bash", "-c", &check_cmd])
+            .output()
+            .map_err(|e| format!("Failed to check WSL binary: {e}"))?;
+
+        let exists = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .contains("exists");
+
+        if !exists {
+            log::trace!("Claude CLI not found in WSL at {}", wsl_path);
+            return Ok(ClaudeCliStatus {
+                installed: false,
+                version: None,
+                path: None,
+            });
+        }
+
+        // Get version via WSL
+        let version = match execute_cli_command_wsl(&wsl_path, "--version") {
+            Ok(output) => {
+                if output.status.success() {
+                    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    log::trace!("Claude CLI raw version output: {}", version_str);
+                    let version = extract_version_number(&version_str);
+                    log::trace!("Claude CLI parsed version: {}", version);
+                    Some(version)
+                } else {
+                    log::warn!("Failed to get Claude CLI version");
+                    None
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to execute Claude CLI: {}", e);
                 None
             }
-        }
-        Err(e) => {
-            log::warn!("Failed to execute Claude CLI: {}", e);
-            None
-        }
-    };
+        };
 
-    Ok(ClaudeCliStatus {
-        installed: true,
-        version,
-        path: Some(binary_path.to_string_lossy().to_string()),
-    })
+        Ok(ClaudeCliStatus {
+            installed: true,
+            version,
+            path: Some(wsl_path),
+        })
+    }
+
+    #[cfg(not(windows))]
+    {
+        use super::config::get_cli_binary_path;
+
+        let binary_path = get_cli_binary_path(&app)?;
+
+        if !binary_path.exists() {
+            log::trace!("Claude CLI not found at {:?}", binary_path);
+            return Ok(ClaudeCliStatus {
+                installed: false,
+                version: None,
+                path: None,
+            });
+        }
+
+        // Try to get the version by running claude --version
+        // Uses shell wrapper on Unix to bypass macOS security restrictions
+        let version = match execute_cli_command(&binary_path, "--version") {
+            Ok(output) => {
+                if output.status.success() {
+                    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    log::trace!("Claude CLI raw version output: {}", version_str);
+                    // claude --version returns just the version number like "1.0.28"
+                    // but handle any prefix like "v1.0.28" or "Claude CLI 1.0.28"
+                    let version = extract_version_number(&version_str);
+                    log::trace!("Claude CLI parsed version: {}", version);
+                    Some(version)
+                } else {
+                    log::warn!("Failed to get Claude CLI version");
+                    None
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to execute Claude CLI: {}", e);
+                None
+            }
+        };
+
+        Ok(ClaudeCliStatus {
+            installed: true,
+            version,
+            path: Some(binary_path.to_string_lossy().to_string()),
+        })
+    }
 }
 
 /// npm package metadata for version listing
@@ -264,34 +339,28 @@ fn get_platform() -> Result<&'static str, String> {
     Err("Unsupported platform".to_string())
 }
 
-/// Execute Claude CLI command. Uses WSL on Windows.
+/// Execute Claude CLI command via WSL (Windows only)
+/// Takes the WSL path directly (e.g., ~/.local/bin/claude)
+#[cfg(windows)]
+fn execute_cli_command_wsl(wsl_path: &str, args: &str) -> Result<std::process::Output, String> {
+    use crate::platform::shell::wsl_shell_command;
+
+    let cmd = format!("'{wsl_path}' {args}");
+    wsl_shell_command(&cmd)?
+        .output()
+        .map_err(|e| format!("Failed to execute CLI via WSL: {e}"))
+}
+
+/// Execute Claude CLI command. Unix only - uses shell wrapper.
+#[cfg(not(windows))]
 fn execute_cli_command(
     binary_path: &std::path::Path,
     args: &str,
 ) -> Result<std::process::Output, String> {
-    #[cfg(windows)]
-    {
-        use crate::platform::shell::{is_wsl_available, windows_to_wsl_path, wsl_shell_command};
-
-        if !is_wsl_available() {
-            return Err("WSL is required on Windows to run Claude CLI".to_string());
-        }
-
-        let wsl_path = windows_to_wsl_path(binary_path.to_str().ok_or("Invalid binary path")?);
-        let cmd = format!("'{}' {}", wsl_path, args);
-
-        wsl_shell_command(&cmd)?
-            .output()
-            .map_err(|e| format!("Failed to execute CLI via WSL: {e}"))
-    }
-
-    #[cfg(not(windows))]
-    {
-        let cmd = format!("{:?} {}", binary_path, args);
-        crate::platform::shell_command(&cmd)
-            .output()
-            .map_err(|e| format!("Failed to execute CLI: {e}"))
-    }
+    let cmd = format!("{:?} {args}", binary_path);
+    crate::platform::shell_command(&cmd)
+        .output()
+        .map_err(|e| format!("Failed to execute CLI: {e}"))
 }
 
 /// Fetch the release manifest containing checksums for all platforms
@@ -333,9 +402,63 @@ fn verify_checksum(data: &[u8], expected: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Install binary to WSL via stdin pipe (Windows only)
+#[cfg(windows)]
+fn install_cli_to_wsl(binary_content: &[u8]) -> Result<String, String> {
+    use crate::platform::shell::is_wsl_available;
+
+    if !is_wsl_available() {
+        return Err(
+            "WSL is required on Windows to install Claude CLI. \
+             Install WSL with: wsl --install"
+                .to_string(),
+        );
+    }
+
+    let wsl_path = get_wsl_cli_binary_path()?;
+    let wsl_dir = ensure_wsl_cli_dir()?;
+
+    log::trace!("Installing Claude CLI to WSL at: {wsl_path}");
+    log::trace!("WSL directory: {wsl_dir}");
+
+    // Install binary via stdin pipe to WSL
+    // This writes the binary directly into WSL's native ext4 filesystem
+    let install_cmd = format!("cat > '{wsl_path}' && chmod +x '{wsl_path}'");
+
+    let mut child = Command::new("wsl")
+        .args(["-e", "bash", "-c", &install_cmd])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn WSL install process: {e}"))?;
+
+    // Write binary content to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(binary_content)
+            .map_err(|e| format!("Failed to write binary to WSL: {e}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait for WSL install: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to install CLI to WSL: {stderr}"));
+    }
+
+    log::trace!("Claude CLI installed to WSL successfully");
+    Ok(wsl_path)
+}
+
 /// Install Claude CLI by downloading the binary directly from Anthropic's distribution bucket
 #[tauri::command]
-pub async fn install_claude_cli(app: AppHandle, version: Option<String>) -> Result<(), String> {
+pub async fn install_claude_cli(
+    app: AppHandle,
+    version: Option<String>,
+) -> Result<(), String> {
     log::trace!("Installing Claude CLI, version: {:?}", version);
 
     // Check if any Claude processes are running - cannot replace binary while in use
@@ -348,9 +471,6 @@ pub async fn install_claude_cli(app: AppHandle, version: Option<String>) -> Resu
             if count == 1 { "session is" } else { "sessions are" }
         ));
     }
-
-    let _cli_dir = ensure_cli_dir(&app)?;
-    let binary_path = get_cli_binary_path(&app)?;
 
     // Emit progress: starting
     emit_progress(&app, "starting", "Preparing installation...", 0);
@@ -409,11 +529,7 @@ pub async fn install_claude_cli(app: AppHandle, version: Option<String>) -> Resu
         .await
         .map_err(|e| format!("Failed to read binary content: {e}"))?;
 
-    log::trace!(
-        "Downloaded {} bytes, saving to {:?}",
-        binary_content.len(),
-        binary_path
-    );
+    log::trace!("Downloaded {} bytes", binary_content.len());
 
     // Verify checksum before writing to disk
     emit_progress(&app, "verifying_checksum", "Verifying checksum...", 55);
@@ -423,48 +539,62 @@ pub async fn install_claude_cli(app: AppHandle, version: Option<String>) -> Resu
     // Emit progress: installing
     emit_progress(&app, "installing", "Installing Claude CLI...", 65);
 
-    // Write the binary to the target path
-    log::trace!("Creating binary file at {:?}", binary_path);
-    let mut file = std::fs::File::create(&binary_path)
-        .map_err(|e| format!("Failed to create binary file: {e}"))?;
-
-    log::trace!("Writing {} bytes to binary file", binary_content.len());
-    file.write_all(&binary_content)
-        .map_err(|e| format!("Failed to write binary file: {e}"))?;
-    log::trace!("Binary file written successfully");
-
-    // Make sure the binary is executable
-    #[cfg(unix)]
+    // Platform-specific installation
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        log::trace!(
-            "Setting executable permissions (0o755) on {:?}",
-            binary_path
-        );
-        let mut perms = std::fs::metadata(&binary_path)
-            .map_err(|e| format!("Failed to get binary metadata: {e}"))?
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&binary_path, perms)
-            .map_err(|e| format!("Failed to set binary permissions: {e}"))?;
-        log::trace!("Executable permissions set successfully");
+        let wsl_path = install_cli_to_wsl(&binary_content)?;
+        emit_progress(&app, "complete", "Installation complete!", 100);
+        log::trace!("Claude CLI installed successfully at {wsl_path}");
     }
 
-    // Remove macOS quarantine attribute to allow execution
-    #[cfg(target_os = "macos")]
+    #[cfg(not(windows))]
     {
-        log::trace!("Removing quarantine attribute from {:?}", binary_path);
-        let _ = Command::new("xattr")
-            .args(["-d", "com.apple.quarantine"])
-            .arg(&binary_path)
-            .output();
-        // Ignore errors - attribute might not exist
+        let _cli_dir = ensure_cli_dir(&app)?;
+        let binary_path = get_cli_binary_path(&app)?;
+
+        // Write the binary to the target path
+        log::trace!("Creating binary file at {:?}", binary_path);
+        let mut file = std::fs::File::create(&binary_path)
+            .map_err(|e| format!("Failed to create binary file: {e}"))?;
+
+        log::trace!("Writing {} bytes to binary file", binary_content.len());
+        file.write_all(&binary_content)
+            .map_err(|e| format!("Failed to write binary file: {e}"))?;
+        log::trace!("Binary file written successfully");
+
+        // Make sure the binary is executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            log::trace!(
+                "Setting executable permissions (0o755) on {:?}",
+                binary_path
+            );
+            let mut perms = std::fs::metadata(&binary_path)
+                .map_err(|e| format!("Failed to get binary metadata: {e}"))?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&binary_path, perms)
+                .map_err(|e| format!("Failed to set binary permissions: {e}"))?;
+            log::trace!("Executable permissions set successfully");
+        }
+
+        // Remove macOS quarantine attribute to allow execution
+        #[cfg(target_os = "macos")]
+        {
+            use std::process::Command;
+            log::trace!("Removing quarantine attribute from {:?}", binary_path);
+            let _ = Command::new("xattr")
+                .args(["-d", "com.apple.quarantine"])
+                .arg(&binary_path)
+                .output();
+            // Ignore errors - attribute might not exist
+        }
+
+        emit_progress(&app, "complete", "Installation complete!", 100);
+        log::trace!("Claude CLI installed successfully at {:?}", binary_path);
     }
 
-    // Emit progress: complete
-    emit_progress(&app, "complete", "Installation complete!", 100);
-
-    log::trace!("Claude CLI installed successfully at {:?}", binary_path);
     Ok(())
 }
 
@@ -479,41 +609,92 @@ pub struct ClaudeAuthStatus {
 
 /// Check if Claude CLI is authenticated by running a simple query
 #[tauri::command]
-pub async fn check_claude_cli_auth(app: AppHandle) -> Result<ClaudeAuthStatus, String> {
+pub async fn check_claude_cli_auth(
+    #[allow(unused_variables)] app: AppHandle,
+) -> Result<ClaudeAuthStatus, String> {
     log::trace!("Checking Claude CLI authentication status");
-
-    let binary_path = get_cli_binary_path(&app)?;
-
-    if !binary_path.exists() {
-        return Ok(ClaudeAuthStatus {
-            authenticated: false,
-            error: Some("Claude CLI not installed".to_string()),
-        });
-    }
 
     // Run a simple non-interactive query to check if authenticated
     // Use --print to avoid interactive mode, and a simple prompt
-    // Uses WSL on Windows, shell wrapper on Unix
     let args = "--print --output-format text -p 'Reply with just the word OK'";
-
     log::trace!("Running auth check with args: {}", args);
 
-    let output = execute_cli_command(&binary_path, args)?;
+    #[cfg(windows)]
+    {
+        use crate::platform::shell::is_wsl_available;
 
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        log::trace!("Claude CLI auth check successful, response: {}", stdout);
-        Ok(ClaudeAuthStatus {
-            authenticated: true,
-            error: None,
-        })
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        log::warn!("Claude CLI auth check failed: {}", stderr);
-        Ok(ClaudeAuthStatus {
-            authenticated: false,
-            error: Some(stderr),
-        })
+        if !is_wsl_available() {
+            return Err("WSL is required on Windows to run Claude CLI".to_string());
+        }
+
+        let wsl_path = get_wsl_cli_binary_path()?;
+
+        // Check if binary exists
+        let check_cmd = format!("test -x '{wsl_path}' && echo exists");
+        let check_output = Command::new("wsl")
+            .args(["-e", "bash", "-c", &check_cmd])
+            .output()
+            .map_err(|e| format!("Failed to check WSL binary: {e}"))?;
+
+        if !String::from_utf8_lossy(&check_output.stdout)
+            .trim()
+            .contains("exists")
+        {
+            return Ok(ClaudeAuthStatus {
+                authenticated: false,
+                error: Some("Claude CLI not installed".to_string()),
+            });
+        }
+
+        let output = execute_cli_command_wsl(&wsl_path, args)?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            log::trace!("Claude CLI auth check successful, response: {}", stdout);
+            Ok(ClaudeAuthStatus {
+                authenticated: true,
+                error: None,
+            })
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            log::warn!("Claude CLI auth check failed: {}", stderr);
+            Ok(ClaudeAuthStatus {
+                authenticated: false,
+                error: Some(stderr),
+            })
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        use super::config::get_cli_binary_path;
+
+        let binary_path = get_cli_binary_path(&app)?;
+
+        if !binary_path.exists() {
+            return Ok(ClaudeAuthStatus {
+                authenticated: false,
+                error: Some("Claude CLI not installed".to_string()),
+            });
+        }
+
+        let output = execute_cli_command(&binary_path, args)?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            log::trace!("Claude CLI auth check successful, response: {}", stdout);
+            Ok(ClaudeAuthStatus {
+                authenticated: true,
+                error: None,
+            })
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            log::warn!("Claude CLI auth check failed: {}", stderr);
+            Ok(ClaudeAuthStatus {
+                authenticated: false,
+                error: Some(stderr),
+            })
+        }
     }
 }
 

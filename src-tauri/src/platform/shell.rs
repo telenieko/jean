@@ -85,6 +85,83 @@ pub fn find_executable(name: &str) -> Option<std::path::PathBuf> {
 
 // === WSL Support (Windows only) ===
 
+/// Check if a path is a WSL UNC path (\\wsl.localhost\... or \\wsl$\...)
+#[cfg(windows)]
+pub fn is_wsl_unc_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.starts_with("//wsl.localhost/") || normalized.starts_with("//wsl$/")
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn is_wsl_unc_path(_path: &str) -> bool {
+    false
+}
+
+/// Check if a path exists, using WSL for UNC paths
+#[cfg(windows)]
+pub fn path_exists(path: &str) -> Result<bool, String> {
+    if is_wsl_unc_path(path) {
+        let wsl_path = windows_to_wsl_path(path);
+        // Use bash -c with proper quoting for reliable path checking
+        let cmd = format!("test -e '{wsl_path}'");
+        let output = Command::new("wsl")
+            .args(["bash", "-c", &cmd])
+            .output()
+            .map_err(|e| format!("Failed to check path via WSL: {e}"))?;
+        Ok(output.status.success())
+    } else {
+        Ok(std::path::Path::new(path).exists())
+    }
+}
+
+#[cfg(not(windows))]
+pub fn path_exists(path: &str) -> Result<bool, String> {
+    Ok(std::path::Path::new(path).exists())
+}
+
+/// Check if a path is a directory, using WSL for UNC paths
+#[cfg(windows)]
+pub fn path_is_dir(path: &str) -> Result<bool, String> {
+    if is_wsl_unc_path(path) {
+        let wsl_path = windows_to_wsl_path(path);
+        let cmd = format!("test -d '{wsl_path}'");
+        let output = Command::new("wsl")
+            .args(["bash", "-c", &cmd])
+            .output()
+            .map_err(|e| format!("Failed to check directory via WSL: {e}"))?;
+        Ok(output.status.success())
+    } else {
+        Ok(std::path::Path::new(path).is_dir())
+    }
+}
+
+#[cfg(not(windows))]
+pub fn path_is_dir(path: &str) -> Result<bool, String> {
+    Ok(std::path::Path::new(path).is_dir())
+}
+
+/// Check if .git exists in path (file or directory), using WSL for UNC paths
+#[cfg(windows)]
+pub fn git_dir_exists(path: &str) -> Result<bool, String> {
+    if is_wsl_unc_path(path) {
+        let wsl_path = windows_to_wsl_path(path);
+        let cmd = format!("test -e '{wsl_path}/.git'");
+        let output = Command::new("wsl")
+            .args(["bash", "-c", &cmd])
+            .output()
+            .map_err(|e| format!("Failed to check .git via WSL: {e}"))?;
+        Ok(output.status.success())
+    } else {
+        Ok(std::path::Path::new(path).join(".git").exists())
+    }
+}
+
+#[cfg(not(windows))]
+pub fn git_dir_exists(path: &str) -> Result<bool, String> {
+    Ok(std::path::Path::new(path).join(".git").exists())
+}
+
 /// Check if WSL is available on Windows
 #[cfg(windows)]
 pub fn is_wsl_available() -> bool {
@@ -101,11 +178,86 @@ pub fn is_wsl_available() -> bool {
     false
 }
 
+/// Result of parsing a Windows path for WSL execution
+#[cfg(windows)]
+pub struct WslPathInfo {
+    /// The Linux path inside WSL
+    pub path: String,
+    /// The distribution name if this is a WSL UNC path, None for Windows drive paths
+    pub distribution: Option<String>,
+}
+
+/// Parse a Windows path and extract WSL path info
+/// Returns the Linux path and optionally the distribution name for UNC paths
+#[cfg(windows)]
+pub fn parse_wsl_path(win_path: &str) -> WslPathInfo {
+    let path = win_path.replace('\\', "/");
+
+    // Handle WSL UNC paths: \\wsl.localhost\Distro\path or \\wsl$\Distro\path
+    if path.starts_with("//wsl.localhost/") || path.starts_with("//wsl$/") {
+        let parts: Vec<&str> = path.splitn(4, '/').collect();
+        // parts = ["", "", "wsl.localhost", "Ubuntu/root/workspace/..."]
+        if parts.len() >= 4 {
+            if let Some(slash_pos) = parts[3].find('/') {
+                let distro = parts[3][..slash_pos].to_string();
+                let linux_path = format!("/{}", &parts[3][slash_pos + 1..]);
+                return WslPathInfo {
+                    path: linux_path,
+                    distribution: Some(distro),
+                };
+            }
+        }
+        // Fallback if parsing fails
+        return WslPathInfo {
+            path,
+            distribution: None,
+        };
+    }
+
+    // Handle standard Windows drive paths: C:\path -> /mnt/c/path
+    if path.len() >= 2 && path.chars().nth(1) == Some(':') {
+        let drive = path.chars().next().unwrap().to_ascii_lowercase();
+        return WslPathInfo {
+            path: format!("/mnt/{}{}", drive, &path[2..]),
+            distribution: None,
+        };
+    }
+
+    WslPathInfo {
+        path,
+        distribution: None,
+    }
+}
+
 /// Convert a Windows path to WSL path format
 /// C:\Users\foo\file.txt -> /mnt/c/Users/foo/file.txt
+/// \\wsl.localhost\Ubuntu\root\workspace -> /root/workspace
+/// \\wsl$\Ubuntu\home\user -> /home/user
 #[cfg(windows)]
 pub fn windows_to_wsl_path(win_path: &str) -> String {
     let path = win_path.replace('\\', "/");
+
+    // Handle WSL UNC paths: \\wsl.localhost\Distro\path or \\wsl$\Distro\path
+    // These are direct access to WSL filesystem from Windows
+    // \\wsl.localhost\Ubuntu\root\workspace -> /root/workspace
+    // \\wsl$\Ubuntu\home\user -> /home/user
+    if path.starts_with("//wsl.localhost/") || path.starts_with("//wsl$/") {
+        // Find the distro name (e.g., "Ubuntu") and extract the path after it
+        let parts: Vec<&str> = path.splitn(4, '/').collect();
+        // parts = ["", "", "wsl.localhost", "Ubuntu/root/workspace/..."]
+        //    or = ["", "", "wsl$", "Ubuntu/root/workspace/..."]
+        if parts.len() >= 4 {
+            // parts[3] = "Ubuntu/root/workspace/..."
+            // Find the first slash after distro name to get the Linux path
+            if let Some(slash_pos) = parts[3].find('/') {
+                return format!("/{}", &parts[3][slash_pos + 1..]);
+            }
+        }
+        // If we can't parse it, return as-is (will likely fail but with clear error)
+        return path;
+    }
+
+    // Handle standard Windows drive paths: C:\path -> /mnt/c/path
     if path.len() >= 2 && path.chars().nth(1) == Some(':') {
         let drive = path.chars().next().unwrap().to_ascii_lowercase();
         format!("/mnt/{}{}", drive, &path[2..])
@@ -139,4 +291,243 @@ pub fn wsl_shell_command(cmd: &str) -> Result<Command, String> {
 pub fn wsl_shell_command(cmd: &str) -> Result<Command, String> {
     // On Unix, just use regular shell
     Ok(shell_command(cmd))
+}
+
+// === Cross-platform Git Command Wrapper ===
+
+use std::path::Path;
+
+/// Escape a string for use in a bash single-quoted context
+/// Single quotes in the string are escaped as: '\''
+pub fn escape_for_bash(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
+/// Create a git command that works on all platforms
+/// On Windows, uses WSL to execute git; on Unix, uses native git
+#[cfg(windows)]
+pub fn create_git_command(args: &[&str], working_dir: &Path) -> Result<Command, String> {
+    if !is_wsl_available() {
+        return Err(
+            "WSL is required on Windows to run git commands. \
+             Install WSL with: wsl --install"
+                .to_string(),
+        );
+    }
+
+    let path_info = parse_wsl_path(working_dir.to_str().unwrap_or("."));
+
+    // Quote each argument to handle spaces and special characters
+    let quoted_args: Vec<String> = args
+        .iter()
+        .map(|arg| format!("'{}'", escape_for_bash(arg)))
+        .collect();
+    let args_str = quoted_args.join(" ");
+
+    let cmd_str = format!(
+        "cd '{}' && git {args_str}",
+        escape_for_bash(&path_info.path)
+    );
+
+    let mut command = Command::new("wsl");
+    // Use specific distribution if available (for WSL UNC paths)
+    if let Some(distro) = &path_info.distribution {
+        command.args(["-d", distro, "-e", "bash", "-c", &cmd_str]);
+    } else {
+        command.args(["-e", "bash", "-c", &cmd_str]);
+    }
+    Ok(command)
+}
+
+#[cfg(not(windows))]
+pub fn create_git_command(args: &[&str], working_dir: &Path) -> Result<Command, String> {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(working_dir);
+    Ok(command)
+}
+
+/// Create a git command with environment variables
+#[cfg(windows)]
+pub fn create_git_command_with_env(
+    args: &[&str],
+    working_dir: &Path,
+    env_vars: &[(&str, &str)],
+) -> Result<Command, String> {
+    if !is_wsl_available() {
+        return Err(
+            "WSL is required on Windows to run git commands. \
+             Install WSL with: wsl --install"
+                .to_string(),
+        );
+    }
+
+    let path_info = parse_wsl_path(working_dir.to_str().unwrap_or("."));
+
+    // Quote each argument to handle spaces and special characters
+    let quoted_args: Vec<String> = args
+        .iter()
+        .map(|arg| format!("'{}'", escape_for_bash(arg)))
+        .collect();
+    let args_str = quoted_args.join(" ");
+
+    // Build env var prefix with escaped values
+    let env_prefix = env_vars
+        .iter()
+        .map(|(k, v)| format!("{k}='{}'", escape_for_bash(v)))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let escaped_path = escape_for_bash(&path_info.path);
+    let cmd_str = if env_prefix.is_empty() {
+        format!("cd '{escaped_path}' && git {args_str}")
+    } else {
+        format!("cd '{escaped_path}' && {env_prefix} git {args_str}")
+    };
+
+    let mut command = Command::new("wsl");
+    // Use specific distribution if available (for WSL UNC paths)
+    if let Some(distro) = &path_info.distribution {
+        command.args(["-d", distro, "-e", "bash", "-c", &cmd_str]);
+    } else {
+        command.args(["-e", "bash", "-c", &cmd_str]);
+    }
+    Ok(command)
+}
+
+#[cfg(not(windows))]
+pub fn create_git_command_with_env(
+    args: &[&str],
+    working_dir: &Path,
+    env_vars: &[(&str, &str)],
+) -> Result<Command, String> {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(working_dir);
+    for (key, value) in env_vars {
+        command.env(key, value);
+    }
+    Ok(command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_windows_to_wsl_path_standard_drive() {
+        // Standard Windows drive paths
+        assert_eq!(
+            windows_to_wsl_path(r"C:\Users\test\project"),
+            "/mnt/c/Users/test/project"
+        );
+        assert_eq!(
+            windows_to_wsl_path(r"D:\workspace\projects"),
+            "/mnt/d/workspace/projects"
+        );
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_wsl_localhost() {
+        // WSL UNC paths using wsl.localhost
+        assert_eq!(
+            windows_to_wsl_path(r"\\wsl.localhost\Ubuntu\root\workspace\projects\test"),
+            "/root/workspace/projects/test"
+        );
+        assert_eq!(
+            windows_to_wsl_path(r"\\wsl.localhost\Ubuntu\home\user\project"),
+            "/home/user/project"
+        );
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_wsl_dollar() {
+        // Older WSL UNC paths using wsl$
+        assert_eq!(
+            windows_to_wsl_path(r"\\wsl$\Ubuntu\home\user\project"),
+            "/home/user/project"
+        );
+        assert_eq!(
+            windows_to_wsl_path(r"\\wsl$\Debian\var\www\html"),
+            "/var/www/html"
+        );
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_different_distros() {
+        // Different distro names
+        assert_eq!(
+            windows_to_wsl_path(r"\\wsl.localhost\Debian\etc\config"),
+            "/etc/config"
+        );
+        assert_eq!(
+            windows_to_wsl_path(r"\\wsl.localhost\Ubuntu-22.04\home\dev"),
+            "/home/dev"
+        );
+    }
+
+    #[test]
+    fn test_is_wsl_unc_path() {
+        // WSL UNC paths
+        assert!(is_wsl_unc_path(r"\\wsl.localhost\Ubuntu\root"));
+        assert!(is_wsl_unc_path(r"\\wsl.localhost\Ubuntu\home\user\project"));
+        assert!(is_wsl_unc_path(r"\\wsl$\Ubuntu\home\user"));
+        assert!(is_wsl_unc_path(r"\\wsl$\Debian\var\www"));
+
+        // Non-WSL paths
+        assert!(!is_wsl_unc_path(r"C:\Users\test"));
+        assert!(!is_wsl_unc_path(r"D:\workspace\projects"));
+        assert!(!is_wsl_unc_path("/home/user/project"));
+        assert!(!is_wsl_unc_path("./relative/path"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_parse_wsl_path_standard_drive() {
+        // Standard Windows drive paths - no distribution
+        let info = parse_wsl_path(r"C:\Users\test\project");
+        assert_eq!(info.path, "/mnt/c/Users/test/project");
+        assert!(info.distribution.is_none());
+
+        let info = parse_wsl_path(r"D:\workspace\projects");
+        assert_eq!(info.path, "/mnt/d/workspace/projects");
+        assert!(info.distribution.is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_parse_wsl_path_wsl_localhost() {
+        // WSL UNC paths using wsl.localhost - includes distribution
+        let info = parse_wsl_path(r"\\wsl.localhost\Ubuntu\root\workspace\projects\test");
+        assert_eq!(info.path, "/root/workspace/projects/test");
+        assert_eq!(info.distribution, Some("Ubuntu".to_string()));
+
+        let info = parse_wsl_path(r"\\wsl.localhost\Ubuntu\home\user\project");
+        assert_eq!(info.path, "/home/user/project");
+        assert_eq!(info.distribution, Some("Ubuntu".to_string()));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_parse_wsl_path_wsl_dollar() {
+        // Older WSL UNC paths using wsl$ - includes distribution
+        let info = parse_wsl_path(r"\\wsl$\Ubuntu\home\user\project");
+        assert_eq!(info.path, "/home/user/project");
+        assert_eq!(info.distribution, Some("Ubuntu".to_string()));
+
+        let info = parse_wsl_path(r"\\wsl$\Debian\var\www\html");
+        assert_eq!(info.path, "/var/www/html");
+        assert_eq!(info.distribution, Some("Debian".to_string()));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_parse_wsl_path_different_distros() {
+        // Different distro names
+        let info = parse_wsl_path(r"\\wsl.localhost\Debian\etc\config");
+        assert_eq!(info.path, "/etc/config");
+        assert_eq!(info.distribution, Some("Debian".to_string()));
+
+        let info = parse_wsl_path(r"\\wsl.localhost\Ubuntu-22.04\home\dev");
+        assert_eq!(info.path, "/home/dev");
+        assert_eq!(info.distribution, Some("Ubuntu-22.04".to_string()));
+    }
 }
