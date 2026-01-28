@@ -112,10 +112,14 @@ pub struct AppPreferences {
     pub disable_thinking_in_non_plan_modes: bool, // Disable thinking in build/yolo modes (only plan uses thinking)
     #[serde(default = "default_session_recap_enabled")]
     pub session_recap_enabled: bool, // Show session recap when returning to unfocused sessions
+    #[serde(default = "default_session_recap_model")]
+    pub session_recap_model: String, // Model for generating session recaps: haiku, sonnet, opus
     #[serde(default = "default_parallel_execution_prompt_enabled")]
     pub parallel_execution_prompt_enabled: bool, // Add system prompt to encourage parallel sub-agent execution
     #[serde(default)]
     pub magic_prompts: MagicPrompts, // Customizable prompts for AI-powered features
+    #[serde(default)]
+    pub magic_prompt_models: MagicPromptModels, // Per-prompt model overrides
     #[serde(default = "default_file_edit_mode")]
     pub file_edit_mode: String, // How to edit files: inline (CodeMirror) or external (VS Code, etc.)
     #[serde(default = "default_quick_access_enabled")]
@@ -124,6 +128,14 @@ pub struct AppPreferences {
     pub quick_access_actions: Vec<String>, // Which actions to show: terminal, run, editor, finder, terminal_app
     #[serde(default)]
     pub quick_access_compact: bool, // Show only icons without labels
+    #[serde(default)]
+    pub ai_language: String, // Preferred language for AI responses (empty = default)
+    #[serde(default = "default_allow_web_tools_in_plan_mode")]
+    pub allow_web_tools_in_plan_mode: bool, // Allow WebFetch/WebSearch in plan mode without prompts
+    #[serde(default = "default_waiting_sound")]
+    pub waiting_sound: String, // Sound when session is waiting for input: none, ding, chime, pop, choochoo
+    #[serde(default = "default_review_sound")]
+    pub review_sound: String, // Sound when session finishes reviewing: none, ding, chime, pop, choochoo
 }
 
 fn default_auto_branch_naming() -> bool {
@@ -226,8 +238,24 @@ fn default_session_recap_enabled() -> bool {
     false // Disabled by default (experimental)
 }
 
+fn default_session_recap_model() -> String {
+    "haiku".to_string() // Use Haiku by default for fast, cheap session recap generation
+}
+
 fn default_parallel_execution_prompt_enabled() -> bool {
     false // Disabled by default (experimental)
+}
+
+fn default_allow_web_tools_in_plan_mode() -> bool {
+    true // Enabled by default
+}
+
+fn default_waiting_sound() -> String {
+    "none".to_string()
+}
+
+fn default_review_sound() -> String {
+    "none".to_string()
 }
 
 // =============================================================================
@@ -249,6 +277,8 @@ pub struct MagicPrompts {
     pub code_review: String,
     #[serde(default = "default_context_summary_prompt")]
     pub context_summary: String,
+    #[serde(default = "default_resolve_conflicts_prompt")]
+    pub resolve_conflicts: String,
 }
 
 fn default_investigate_issue_prompt() -> String {
@@ -412,6 +442,47 @@ Format as clean markdown. Be concise but capture reasoning.
         .to_string()
 }
 
+fn default_resolve_conflicts_prompt() -> String {
+    r#"Please help me resolve these conflicts. Analyze the diff above, explain what's conflicting in each file, and guide me through resolving each conflict.
+
+After resolving each file's conflicts, stage it with `git add`. Then run the appropriate continue command (`git rebase --continue`, `git merge --continue`, or `git cherry-pick --continue`). If more conflicts appear, resolve those too. Keep going until the operation is fully complete and the branch is ready to push."#
+        .to_string()
+}
+
+/// Per-prompt model overrides for magic prompts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MagicPromptModels {
+    #[serde(default = "default_model")]
+    pub investigate_model: String,
+    #[serde(default = "default_haiku_model")]
+    pub pr_content_model: String,
+    #[serde(default = "default_haiku_model")]
+    pub commit_message_model: String,
+    #[serde(default = "default_haiku_model")]
+    pub code_review_model: String,
+    #[serde(default = "default_model")]
+    pub context_summary_model: String,
+    #[serde(default = "default_model")]
+    pub resolve_conflicts_model: String,
+}
+
+fn default_haiku_model() -> String {
+    "haiku".to_string()
+}
+
+impl Default for MagicPromptModels {
+    fn default() -> Self {
+        Self {
+            investigate_model: default_model(),
+            pr_content_model: default_haiku_model(),
+            commit_message_model: default_haiku_model(),
+            code_review_model: default_haiku_model(),
+            context_summary_model: default_model(),
+            resolve_conflicts_model: default_model(),
+        }
+    }
+}
+
 impl Default for MagicPrompts {
     fn default() -> Self {
         Self {
@@ -421,6 +492,7 @@ impl Default for MagicPrompts {
             commit_message: default_commit_message_prompt(),
             code_review: default_code_review_prompt(),
             context_summary: default_context_summary_prompt(),
+            resolve_conflicts: default_resolve_conflicts_prompt(),
         }
     }
 }
@@ -450,12 +522,18 @@ impl Default for AppPreferences {
             syntax_theme_light: default_syntax_theme_light(),
             disable_thinking_in_non_plan_modes: default_disable_thinking_in_non_plan_modes(),
             session_recap_enabled: default_session_recap_enabled(),
+            session_recap_model: default_session_recap_model(),
             parallel_execution_prompt_enabled: default_parallel_execution_prompt_enabled(),
             magic_prompts: MagicPrompts::default(),
+            magic_prompt_models: MagicPromptModels::default(),
             file_edit_mode: default_file_edit_mode(),
             quick_access_enabled: default_quick_access_enabled(),
             quick_access_actions: default_quick_access_actions(),
             quick_access_compact: false,
+            ai_language: String::new(),
+            allow_web_tools_in_plan_mode: default_allow_web_tools_in_plan_mode(),
+            waiting_sound: default_waiting_sound(),
+            review_sound: default_review_sound(),
         }
     }
 }
@@ -1153,6 +1231,7 @@ pub fn run() {
             projects::get_worktree,
             projects::create_worktree,
             projects::create_worktree_from_existing_branch,
+            projects::checkout_pr,
             projects::delete_worktree,
             projects::create_base_session,
             projects::close_base_session,
@@ -1189,6 +1268,7 @@ pub fn run() {
             projects::git_pull,
             projects::git_push,
             projects::merge_worktree_to_base,
+            projects::get_merge_conflicts,
             projects::reorder_projects,
             projects::reorder_worktrees,
             projects::fetch_worktrees_status,
@@ -1197,12 +1277,14 @@ pub fn run() {
             projects::list_claude_commands,
             // GitHub issues commands
             projects::list_github_issues,
+            projects::search_github_issues,
             projects::get_github_issue,
             projects::load_issue_context,
             projects::list_loaded_issue_contexts,
             projects::remove_issue_context,
             // GitHub PR commands
             projects::list_github_prs,
+            projects::search_github_prs,
             projects::get_github_pr,
             projects::load_pr_context,
             projects::list_loaded_pr_contexts,
@@ -1260,6 +1342,7 @@ pub fn run() {
             chat::mark_plan_approved,
             // Chat commands - Image handling
             chat::save_pasted_image,
+            chat::save_dropped_image,
             chat::delete_pasted_image,
             // Chat commands - Text paste handling
             chat::save_pasted_text,

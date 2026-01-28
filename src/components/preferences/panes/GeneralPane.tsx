@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { useClaudeCliStatus, useClaudeCliAuth, claudeCliQueryKeys } from '@/services/claude-cli'
 import { useGhCliStatus, useGhCliAuth, ghCliQueryKeys } from '@/services/gh-cli'
 import { useUIStore } from '@/store/ui-store'
@@ -38,12 +39,15 @@ import {
   gitPollIntervalOptions,
   remotePollIntervalOptions,
   archiveRetentionOptions,
+  notificationSoundOptions,
   type ClaudeModel,
   type TerminalApp,
   type EditorApp,
   type QuickAccessAction,
+  type NotificationSound,
 } from '@/types/preferences'
 import { QuickAccessActionsPicker } from '../QuickAccessActionsPicker'
+import { playNotificationSound } from '@/lib/sounds'
 import type { ThinkingLevel } from '@/types/chat'
 import {
   setGitPollInterval,
@@ -227,6 +231,22 @@ export const GeneralPane: React.FC = () => {
   const handleQuickAccessCompactChange = (checked: boolean) => {
     if (preferences) {
       savePreferences.mutate({ ...preferences, quick_access_compact: checked })
+    }
+  }
+
+  const handleWaitingSoundChange = (value: NotificationSound) => {
+    if (preferences) {
+      savePreferences.mutate({ ...preferences, waiting_sound: value })
+      // Play preview of the selected sound
+      playNotificationSound(value)
+    }
+  }
+
+  const handleReviewSoundChange = (value: NotificationSound) => {
+    if (preferences) {
+      savePreferences.mutate({ ...preferences, review_sound: value })
+      // Play preview of the selected sound
+      playNotificationSound(value)
     }
   }
 
@@ -483,6 +503,42 @@ export const GeneralPane: React.FC = () => {
             />
           </InlineField>
 
+          <InlineField
+            label="AI Language"
+            description="Language for AI responses (e.g. French, 日本語)"
+          >
+            <Input
+              className="w-40"
+              placeholder="Default"
+              value={preferences?.ai_language ?? ''}
+              onChange={e => {
+                if (preferences) {
+                  savePreferences.mutate({
+                    ...preferences,
+                    ai_language: e.target.value,
+                  })
+                }
+              }}
+            />
+          </InlineField>
+
+          <InlineField
+            label="Allow web tools in plan mode"
+            description="Auto-approve WebFetch/WebSearch without prompts"
+          >
+            <Switch
+              checked={preferences?.allow_web_tools_in_plan_mode ?? true}
+              onCheckedChange={checked => {
+                if (preferences) {
+                  savePreferences.mutate({
+                    ...preferences,
+                    allow_web_tools_in_plan_mode: checked,
+                  })
+                }
+              }}
+            />
+          </InlineField>
+
           <InlineField label="Editor" description="App to open worktrees in">
             <Select
               value={preferences?.editor ?? 'vscode'}
@@ -599,6 +655,52 @@ export const GeneralPane: React.FC = () => {
               </InlineField>
             </>
           )}
+        </div>
+      </SettingsSection>
+
+      <SettingsSection title="Notifications">
+        <div className="space-y-4">
+          <InlineField
+            label="Waiting sound"
+            description="Play when session needs your input"
+          >
+            <Select
+              value={preferences?.waiting_sound ?? 'none'}
+              onValueChange={handleWaitingSoundChange}
+            >
+              <SelectTrigger className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {notificationSoundOptions.map(option => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </InlineField>
+
+          <InlineField
+            label="Review sound"
+            description="Play when session finishes"
+          >
+            <Select
+              value={preferences?.review_sound ?? 'none'}
+              onValueChange={handleReviewSoundChange}
+            >
+              <SelectTrigger className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {notificationSoundOptions.map(option => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </InlineField>
         </div>
       </SettingsSection>
 

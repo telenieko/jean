@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { toast } from 'sonner'
 import { logger } from '@/lib/logger'
+import { disposeAllWorktreeTerminals } from '@/lib/terminal-instances'
 import type {
   Project,
   Worktree,
@@ -536,9 +537,12 @@ export function useWorktreeEvents() {
           }
         )
 
-        // Set as active worktree for chat
+        // Select worktree in sidebar and set as active for chat
+        const { expandProject, selectWorktree } = useProjectsStore.getState()
         const { setActiveWorktree, addSetupScriptResult } =
           useChatStore.getState()
+        expandProject(worktree.project_id)
+        selectWorktree(worktree.id)
         setActiveWorktree(worktree.id, worktree.path)
 
         // Add setup script output to chat store if present
@@ -562,7 +566,7 @@ export function useWorktreeEvents() {
             // Consume the flag before dispatching
             useUIStore.getState().consumeAutoInvestigate(worktree.id)
             window.dispatchEvent(
-              new CustomEvent('magic-command', { detail: { command: 'investigate-issue' } })
+              new CustomEvent('magic-command', { detail: { command: 'investigate' } })
             )
           }, 5000) // 5 second max wait
 
@@ -573,7 +577,7 @@ export function useWorktreeEvents() {
               // Consume the flag before dispatching
               useUIStore.getState().consumeAutoInvestigate(worktree.id)
               window.dispatchEvent(
-                new CustomEvent('magic-command', { detail: { command: 'investigate-issue' } })
+                new CustomEvent('magic-command', { detail: { command: 'investigate' } })
               )
             }
           }
@@ -591,7 +595,7 @@ export function useWorktreeEvents() {
             // Consume the flag before dispatching
             useUIStore.getState().consumeAutoInvestigatePR(worktree.id)
             window.dispatchEvent(
-              new CustomEvent('magic-command', { detail: { command: 'investigate-pr' } })
+              new CustomEvent('magic-command', { detail: { command: 'investigate' } })
             )
           }, 5000) // 5 second max wait
 
@@ -602,7 +606,7 @@ export function useWorktreeEvents() {
               // Consume the flag before dispatching
               useUIStore.getState().consumeAutoInvestigatePR(worktree.id)
               window.dispatchEvent(
-                new CustomEvent('magic-command', { detail: { command: 'investigate-pr' } })
+                new CustomEvent('magic-command', { detail: { command: 'investigate' } })
               )
             }
           }
@@ -748,6 +752,31 @@ export function useWorktreeEvents() {
 
         // Invalidate archived worktrees query
         queryClient.invalidateQueries({ queryKey: ['archived-worktrees'] })
+
+        // Check if this worktree was marked for auto-investigate (PR)
+        const shouldInvestigatePR = useUIStore.getState().autoInvestigatePRWorktreeIds.has(worktree.id)
+        if (shouldInvestigatePR) {
+          const prTimeoutId = setTimeout(() => {
+            window.removeEventListener('chat-ready-for-investigate', prReadyHandler as EventListener)
+            useUIStore.getState().consumeAutoInvestigatePR(worktree.id)
+            window.dispatchEvent(
+              new CustomEvent('magic-command', { detail: { command: 'investigate' } })
+            )
+          }, 5000)
+
+          const prReadyHandler = (e: CustomEvent<{ worktreeId: string; type: string }>) => {
+            if (e.detail.worktreeId === worktree.id && e.detail.type === 'pr') {
+              clearTimeout(prTimeoutId)
+              window.removeEventListener('chat-ready-for-investigate', prReadyHandler as EventListener)
+              useUIStore.getState().consumeAutoInvestigatePR(worktree.id)
+              window.dispatchEvent(
+                new CustomEvent('magic-command', { detail: { command: 'investigate' } })
+              )
+            }
+          }
+
+          window.addEventListener('chat-ready-for-investigate', prReadyHandler as EventListener)
+        }
       })
     )
 
@@ -921,6 +950,9 @@ export function useDeleteWorktree() {
         }
       )
 
+      // Cleanup terminal instances for this worktree
+      disposeAllWorktreeTerminals(worktreeId)
+
       // Clear chat if the deleted worktree was active
       const { activeWorktreeId, clearActiveWorktree } = useChatStore.getState()
       if (activeWorktreeId === worktreeId) {
@@ -985,6 +1017,9 @@ export function useArchiveWorktree() {
 
       // Invalidate archived sessions query (worktree's sessions are also archived)
       queryClient.invalidateQueries({ queryKey: ['all-archived-sessions'] })
+
+      // Cleanup terminal instances for this worktree
+      disposeAllWorktreeTerminals(worktreeId)
 
       // Clear chat if this worktree was active
       const { activeWorktreeId, clearActiveWorktree } = useChatStore.getState()
@@ -1216,6 +1251,9 @@ export function useCloseBaseSession() {
         queryKey: projectsQueryKeys.worktrees(projectId),
       })
 
+      // Cleanup terminal instances for this worktree
+      disposeAllWorktreeTerminals(worktreeId)
+
       // Clear chat if the closed session was active
       const { activeWorktreeId, clearActiveWorktree } = useChatStore.getState()
       if (activeWorktreeId === worktreeId) {
@@ -1259,6 +1297,9 @@ export function useCloseBaseSessionClean() {
       queryClient.invalidateQueries({
         queryKey: projectsQueryKeys.worktrees(projectId),
       })
+
+      // Cleanup terminal instances for this worktree
+      disposeAllWorktreeTerminals(worktreeId)
 
       // Clear chat if the closed session was active
       const { activeWorktreeId, clearActiveWorktree } = useChatStore.getState()
@@ -1554,7 +1595,8 @@ export async function updateWorktreeCachedStatus(
   branchDiffAdded: number | null = null,
   branchDiffRemoved: number | null = null,
   baseBranchAheadCount: number | null = null,
-  baseBranchBehindCount: number | null = null
+  baseBranchBehindCount: number | null = null,
+  worktreeAheadCount: number | null = null
 ): Promise<void> {
   if (!isTauri()) return
 
@@ -1570,6 +1612,7 @@ export async function updateWorktreeCachedStatus(
     branchDiffRemoved,
     baseBranchAheadCount,
     baseBranchBehindCount,
+    worktreeAheadCount,
   })
 }
 
@@ -1933,7 +1976,11 @@ export function useMoveItem() {
     },
     onError: error => {
       const message =
-        error instanceof Error ? error.message : 'Unknown error occurred'
+        typeof error === 'string'
+          ? error
+          : error instanceof Error
+            ? error.message
+            : 'Unknown error occurred'
       logger.error('Failed to move item', { error })
       toast.error('Failed to move item', { description: message })
     },

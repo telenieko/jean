@@ -2,6 +2,24 @@ import type { ThinkingLevel } from './chat'
 import { DEFAULT_KEYBINDINGS, type KeybindingsMap } from './keybindings'
 
 // =============================================================================
+// Notification Sounds
+// =============================================================================
+
+export type NotificationSound = 'none' | 'ding' | 'chime' | 'pop' | 'choochoo'
+
+export const notificationSoundOptions: {
+  value: NotificationSound
+  label: string
+}[] = [
+  { value: 'none', label: 'None' },
+  // More sounds will be added later:
+  // { value: 'ding', label: 'Ding' },
+  // { value: 'chime', label: 'Chime' },
+  // { value: 'pop', label: 'Pop' },
+  // { value: 'choochoo', label: 'Choo-choo' },
+]
+
+// =============================================================================
 // Magic Prompts - Customizable prompts for AI-powered features
 // =============================================================================
 
@@ -22,6 +40,8 @@ export interface MagicPrompts {
   code_review: string
   /** Prompt for context summarization */
   context_summary: string
+  /** Prompt for resolving git conflicts (appended to conflict resolution messages) */
+  resolve_conflicts: string
 }
 
 /** Default prompt for investigating GitHub issues */
@@ -173,6 +193,11 @@ Format as clean markdown. Be concise but capture reasoning.
 {conversation}
 </conversation>`
 
+/** Default prompt for resolving git conflicts */
+export const DEFAULT_RESOLVE_CONFLICTS_PROMPT = `Please help me resolve these conflicts. Analyze the diff above, explain what's conflicting in each file, and guide me through resolving each conflict.
+
+After resolving each file's conflicts, stage it with \`git add\`. Then run the appropriate continue command (\`git rebase --continue\`, \`git merge --continue\`, or \`git cherry-pick --continue\`). If more conflicts appear, resolve those too. Keep going until the operation is fully complete and the branch is ready to push.`
+
 /** Default values for all magic prompts */
 export const DEFAULT_MAGIC_PROMPTS: MagicPrompts = {
   investigate_issue: DEFAULT_INVESTIGATE_ISSUE_PROMPT,
@@ -181,6 +206,29 @@ export const DEFAULT_MAGIC_PROMPTS: MagicPrompts = {
   commit_message: DEFAULT_COMMIT_MESSAGE_PROMPT,
   code_review: DEFAULT_CODE_REVIEW_PROMPT,
   context_summary: DEFAULT_CONTEXT_SUMMARY_PROMPT,
+  resolve_conflicts: DEFAULT_RESOLVE_CONFLICTS_PROMPT,
+}
+
+/**
+ * Per-prompt model overrides. Field names use snake_case to match Rust struct exactly.
+ */
+export interface MagicPromptModels {
+  investigate_model: ClaudeModel
+  pr_content_model: ClaudeModel
+  commit_message_model: ClaudeModel
+  code_review_model: ClaudeModel
+  context_summary_model: ClaudeModel
+  resolve_conflicts_model: ClaudeModel
+}
+
+/** Default models for each magic prompt */
+export const DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels = {
+  investigate_model: 'opus',
+  pr_content_model: 'haiku',
+  commit_message_model: 'haiku',
+  code_review_model: 'haiku',
+  context_summary_model: 'opus',
+  resolve_conflicts_model: 'opus',
 }
 
 // Types that match the Rust AppPreferences struct
@@ -209,12 +257,18 @@ export interface AppPreferences {
   syntax_theme_light: SyntaxTheme // Syntax highlighting theme for light mode
   disable_thinking_in_non_plan_modes: boolean // Disable thinking in build/yolo modes (only plan uses thinking)
   session_recap_enabled: boolean // Show session recap when returning to unfocused sessions
+  session_recap_model: ClaudeModel // Model for generating session recaps
   parallel_execution_prompt_enabled: boolean // Add system prompt to encourage parallel sub-agent execution
   magic_prompts: MagicPrompts // Customizable prompts for AI-powered features
+  magic_prompt_models: MagicPromptModels // Per-prompt model overrides
   file_edit_mode: FileEditMode // How to edit files: inline (CodeMirror) or external (VS Code, etc.)
   quick_access_enabled: boolean // Enable quick access buttons on worktree hover
   quick_access_actions: QuickAccessAction[] // Which actions to show in quick access
   quick_access_compact: boolean // Show only icons without labels
+  ai_language: string // Preferred language for AI responses (empty = default)
+  allow_web_tools_in_plan_mode: boolean // Allow WebFetch/WebSearch in plan mode without prompts
+  waiting_sound: NotificationSound // Sound when session is waiting for input
+  review_sound: NotificationSound // Sound when session finishes reviewing
 }
 
 export type FileEditMode = 'inline' | 'external'
@@ -420,10 +474,16 @@ export const defaultPreferences: AppPreferences = {
   syntax_theme_light: 'github-light',
   disable_thinking_in_non_plan_modes: true, // Default: only plan mode uses thinking
   session_recap_enabled: false, // Default: disabled (experimental)
+  session_recap_model: 'haiku', // Default: haiku for fast recaps
   parallel_execution_prompt_enabled: false, // Default: disabled (experimental)
   magic_prompts: DEFAULT_MAGIC_PROMPTS,
+  magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
   file_edit_mode: 'external',
   quick_access_enabled: true,
   quick_access_actions: ['terminal', 'editor'],
   quick_access_compact: false,
+  ai_language: '', // Default: empty (Claude's default behavior)
+  allow_web_tools_in_plan_mode: true, // Default: enabled
+  waiting_sound: 'none',
+  review_sound: 'none',
 }
