@@ -27,6 +27,8 @@ import {
   AuthLoginState,
 } from './CliSetupComponents'
 import { toast } from 'sonner'
+import { isNativeApp } from '@/lib/environment'
+import { logger } from '@/lib/logger'
 import type { ReleaseInfo } from '@/types/claude-cli'
 import type { GhReleaseInfo } from '@/types/gh-cli'
 
@@ -306,6 +308,17 @@ function OnboardingDialogContent() {
     setOnboardingStartStep(null)
   }, [claudeSetup, ghSetup, setOnboardingOpen, setOnboardingStartStep])
 
+  // Exit app when user closes dialog during initial setup (not reinstall)
+  const handleExitApp = useCallback(async () => {
+    if (!isNativeApp()) return
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window')
+      await getCurrentWindow().destroy()
+    } catch (error) {
+      logger.error('Failed to exit app', { error })
+    }
+  }, [])
+
   const handleSkipGh = useCallback(() => {
     // Only available on error - graceful fallback
     setStep('complete')
@@ -353,6 +366,29 @@ function OnboardingDialogContent() {
     claudeSetup.status?.installed && step === 'claude-setup'
   const isGhReinstall = ghSetup.status?.installed && step === 'gh-setup'
 
+  // Determine if closing dialog should exit app (initial setup) vs just close (reinstall)
+  const shouldExitOnClose = useCallback(() => {
+    if (step === 'complete') return false
+    if (step === 'claude-setup' || step === 'claude-installing') {
+      return !isClaudeReinstall
+    }
+    if (step === 'gh-setup' || step === 'gh-installing') {
+      return !isGhReinstall
+    }
+    return false
+  }, [step, isClaudeReinstall, isGhReinstall])
+
+  const handleOpenChange = useCallback(
+    (open: boolean) => {
+      if (!open && shouldExitOnClose()) {
+        handleExitApp()
+      } else {
+        setOnboardingOpen(open)
+      }
+    },
+    [shouldExitOnClose, handleExitApp, setOnboardingOpen]
+  )
+
   // Build CLI login command from binary path
   const claudeLoginCommand = claudeSetup.status?.path
     ? `'${claudeSetup.status.path.replace(/'/g, "'\\''")}'`
@@ -362,12 +398,15 @@ function OnboardingDialogContent() {
     : ''
 
   // Determine dialog title and description
+  // showClose: whether to show the close button
+  // exitOnClose: whether closing should exit the app (initial setup) vs just close dialog (reinstall)
   const getDialogContent = () => {
     if (step === 'complete') {
       return {
         title: 'Setup Complete',
         description: 'All required tools have been installed and authenticated.',
         showClose: true,
+        exitOnClose: false,
       }
     }
 
@@ -379,7 +418,8 @@ function OnboardingDialogContent() {
         description: isClaudeReinstall
           ? 'Select a version to install. This will replace the current installation.'
           : 'Jean needs Claude CLI to work. Please install it to continue.',
-        showClose: isClaudeReinstall,
+        showClose: true,
+        exitOnClose: !isClaudeReinstall,
       }
     }
 
@@ -391,6 +431,7 @@ function OnboardingDialogContent() {
         title: 'Authenticate Claude CLI',
         description: 'Claude CLI requires authentication to function.',
         showClose: false,
+        exitOnClose: false,
       }
     }
 
@@ -402,7 +443,8 @@ function OnboardingDialogContent() {
         description: isGhReinstall
           ? 'Select a version to install. This will replace the current installation.'
           : 'GitHub CLI is required for GitHub integration.',
-        showClose: isGhReinstall,
+        showClose: true,
+        exitOnClose: !isGhReinstall,
       }
     }
 
@@ -411,10 +453,11 @@ function OnboardingDialogContent() {
         title: 'Authenticate GitHub CLI',
         description: 'Authenticate GitHub CLI for full functionality.',
         showClose: false,
+        exitOnClose: false,
       }
     }
 
-    return { title: 'Setup', description: '', showClose: false }
+    return { title: 'Setup', description: '', showClose: false, exitOnClose: false }
   }
 
   const dialogContent = getDialogContent()
@@ -481,7 +524,7 @@ function OnboardingDialogContent() {
   }
 
   return (
-    <Dialog open={onboardingOpen} onOpenChange={setOnboardingOpen}>
+    <Dialog open={onboardingOpen} onOpenChange={handleOpenChange}>
       <DialogContent
         className="sm:max-w-[500px]"
         showCloseButton={dialogContent.showClose}
